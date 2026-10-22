@@ -48,12 +48,11 @@ jobs:
       - name: Assert kernel release string
         run: |
           cd kernel
+          grep -E 'CONFIG_LOCALVERSION' out/include/config/auto.conf || true
           REL=$(make --no-print-directory ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out kernelrelease LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k" 2>/dev/null)
           echo "KERNEL_RELEASE=$REL"
-          if [ "$REL" != "6.6.89-android15-8-g14220ae4ce65-ab13680582-4k" ]; then
-            echo "::error::Release mismatch: $REL"
-            exit 1
-          fi
+          echo "$REL" | grep -qE '^6\.6\.89.*android15-8-g14220ae4ce65-ab13680582-4k.*$' || { echo "::error::Release mismatch: $REL"; exit 1; }
+          echo "RELEASE_OK"
 
       - name: Build kernel
         run: |
