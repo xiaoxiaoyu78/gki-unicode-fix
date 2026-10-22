@@ -1,0 +1,77 @@
+name: gki-unicode-fix-build
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout GKI 6.6 at exact commit
+        uses: actions/checkout@v4
+        with:
+          repository: aosp-mirror/kernel_common
+          ref: 14220ae4ce65ba58711f65587ef4e93f408892fb
+          path: kernel
+
+      - name: Get unicode fix patch
+        run: |
+          curl -fsSL -o fix1.patch "https://raw.githubusercontent.com/${{ github.repository }}/main/fix1.patch"
+          head -5 fix1.patch
+
+      - name: Apply patch
+        run: |
+          cd kernel
+          patch -p1 --dry-run < ../fix1.patch
+          patch -p1 < ../fix1.patch
+          echo PATCH_APPLIED
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q flex bison bc cpio lz4 zstd xz-utils python3 file gawk dwarves libssl-dev libelf-dev libncurses-dev
+
+      - name: Check toolchain
+        run: |
+          clang --version | head -1
+          ld.lld --version | head -1
+
+      - name: Configure gki_defconfig
+        run: |
+          cd kernel
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out gki_defconfig
+          scripts/config --file out/.config --disable LOCALVERSION_AUTO
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out olddefconfig
+
+      - name: Assert kernel release string
+        run: |
+          cd kernel
+          REL=$(make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out kernelrelease LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k")
+          echo "KERNEL_RELEASE=$REL"
+          if [ "$REL" != "6.6.89-android15-8-g14220ae4ce65-ab13680582-4k" ]; then
+            echo "::error::Release mismatch: $REL"
+            exit 1
+          fi
+
+      - name: Build kernel
+        run: |
+          cd kernel
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out -j$(nproc) LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k"
+
+      - name: Show artifacts
+        run: |
+          ls -la kernel/out/arch/arm64/boot/
+          cat kernel/out/include/config/kernel.release
+          ls -la kernel/out/vmlinux 2>/dev/null || true
+
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixed-kernel-6.6.89
+          path: |
+            kernel/out/arch/arm64/boot/Image
+            kernel/out/arch/arm64/boot/Image.lz4
+            kernel/out/vmlinux
+            kernel/out/.config
+            kernel/out/include/config/kernel.release
+          if-no-files-found: error
