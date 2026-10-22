@@ -41,7 +41,9 @@ jobs:
           cd kernel
           make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out gki_defconfig
           scripts/config --file out/.config --disable LOCALVERSION_AUTO
+          scripts/config --file out/.config --set-str LOCALVERSION ""
           make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out olddefconfig
+          grep -E '^#? ?CONFIG_LOCALVERSION' out/.config
 
       - name: Assert kernel release string
         run: |
