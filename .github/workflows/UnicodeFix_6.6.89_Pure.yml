@@ -1,0 +1,97 @@
+name: UnicodeFix_6.6.89_Pure
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build_6.6.89_unicode_fix_pure
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: aosp-mirror/kernel_common
+          ref: 14220ae4ce65ba58711f65587ef4e93f408892fb
+          path: kernel
+
+      - name: Get unicode zero-width fix patch (获取零宽修复补丁)
+        run: |
+          curl -fsSL -o fix1.patch "https://raw.githubusercontent.com/xiaoxiaoyu78/gki-unicode-fix/main/fix1.patch"
+          head -5 fix1.patch
+
+      - name: Apply patch (应用补丁)
+        run: |
+          cd kernel
+          echo "=== dry-run ==="
+          patch -p1 --dry-run < ../fix1.patch
+          echo "=== apply ==="
+          patch -p1 < ../fix1.patch
+          echo "=== verify ignore_init removed ==="
+          if grep -q "ignore_init" fs/unicode/mkutf8data.c; then echo "WARNING: ignore_init still present"; else echo "OK: ignore_init removed"; fi
+          echo "PATCH_APPLIED"
+
+      - name: Install build deps (安装编译依赖)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q flex bison bc cpio lz4 zstd xz-utils python3 file gawk dwarves libssl-dev libelf-dev libncurses-dev clang lld llvm
+
+      - name: Check toolchain
+        run: |
+          clang --version | head -1
+          ld.lld --version | head -1
+
+      - name: Configure gki_defconfig (配置官方默认配置)
+        run: |
+          cd kernel
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out gki_defconfig
+          scripts/config --file out/.config --disable LOCALVERSION_AUTO
+          scripts/config --file out/.config --set-str LOCALVERSION ""
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out olddefconfig
+          grep -E '^#? ?CONFIG_LOCALVERSION' out/.config || true
+
+      - name: Assert kernel release string (校验内核版本字符串)
+        run: |
+          cd kernel
+          REL=$(make --no-print-directory ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out kernelrelease LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k" 2>/dev/null)
+          echo "KERNEL_RELEASE=$REL"
+          echo "$REL" | grep -qE '^6\.6\.89.*android15-8-g14220ae4ce65-ab13680582-4k.*$' || { echo "::error::Release mismatch: $REL"; exit 1; }
+          echo "RELEASE_OK"
+
+      - name: Build kernel (编译内核)
+        run: |
+          cd kernel
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out -j$(nproc) LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k"
+
+      - name: Show artifacts (查看产物)
+        run: |
+          ls -la kernel/out/arch/arm64/boot/
+          cat kernel/out/include/config/kernel.release
+
+      - name: Upload Image artifact (上传内核Image产物)
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixed-kernel-6.6.89-Image
+          path: |
+            kernel/out/arch/arm64/boot/Image
+            kernel/out/.config
+            kernel/out/include/config/kernel.release
+          if-no-files-found: error
+
+      - name: Publish Image release (发布Image到release)
+        if: always()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: unicode-fix-6.6.89-${{ github.run_id }}
+          name: unicode-fix-6.6.89-${{ github.run_id }}
+          body: |
+            Pure 6.6.89 kernel with CVE-2024-43093 zero-width fix.
+            Kernel release: 6.6.89-android15-8-g14220ae4ce65-ab13680582-4k
+            Patch: UPSTREAM unicode: Don't special case ignorable code points
+          files: |
+            kernel/out/arch/arm64/boot/Image
+            kernel/out/include/config/kernel.release
+          fail_on_unmatched: false
