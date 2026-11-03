@@ -1,0 +1,60 @@
+name: Repack_VioletAVB_6.6.89
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  repack:
+    name: Repack_VioletAVB_with_fixed_kernel
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Download fixed kernel Image (下载修复内核Image)
+        run: |
+          curl -fsSL -o Image "https://github.com/xiaoxiaoyu78/gki-unicode-fix/releases/download/unicode-fix-6.6.89-41605401437/Image"
+          file Image
+          grep -a -o "Linux version [^ ]*" Image | head -1
+
+      - name: Download VioletAVB base boot (下载VioletAVB基底)
+        run: |
+          curl -fsSL -o base.zip "https://aka.doubaocdn.com/s/rnjqtJOYj9"
+          unzip -o base.zip
+          ls -la VioletAVB_boot.img
+
+      - name: Repack with magiskboot (用magiskboot替换内核)
+        run: |
+          curl -fsSL -o avb.tar.gz "https://github.com/showdo/AOSP-Testkey-BootSigner/archive/refs/heads/main.tar.gz"
+          tar -xzf avb.tar.gz
+          chmod +x AOSP-Testkey-BootSigner-main/tools/magiskboot
+          mkdir -p work && cp VioletAVB_boot.img work/boot.img
+          cd work
+          ../AOSP-Testkey-BootSigner-main/tools/magiskboot unpack boot.img
+          rm -f kernel && cp ../Image kernel
+          ../AOSP-Testkey-BootSigner-main/tools/magiskboot repack boot.img
+          ls -la new-boot.img
+          cp new-boot.img ../AOSP-Testkey-BootSigner-main/boot.img
+          cd ..
+
+      - name: AVB sign (AVB签名)
+        run: |
+          cd AOSP-Testkey-BootSigner-main
+          python3 rebuild_avb.py --chained-mode
+          ls -la boot.img
+          python3 tools/avbtool.py info_image --image boot.img | grep -E "Algorithm|Partition Name|Prop: com.android.build.boot.security" | head -6
+
+      - name: Publish boot release (发布boot到release)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: unicode-fix-6.6.89-boot-${{ github.run_id }}
+          name: unicode-fix-6.6.89-boot-${{ github.run_id }}
+          body: |
+            VioletAVB_boot.img repacked with fixed kernel (CVE-2024-43093 zero-width).
+            Kernel: 6.6.89-android15-8-g14220ae4ce65-ab13680582-4k
+            AVB: AOSP testkey chained sign
+            Direct flash via fastboot / recovery.
+          files: |
+            AOSP-Testkey-BootSigner-main/boot.img
+          fail_on_unmatched: false
