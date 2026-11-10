@@ -44,23 +44,27 @@ index cf487b0..628c4ad 100644
  			   argv, envp, flags);
 diff --git a/fs/skroot_umh.c b/fs/skroot_umh.c
 new file mode 100644
-index 0000000..fb82011
+index 0000000..ef11e90
 --- /dev/null
 +++ b/fs/skroot_umh.c
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,134 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
-+ * fs/skroot_umh.c - 内核态 root 落地钩子
++ * fs/skroot_umh.c - 内核态 root 落地钩子（带「一机一码」令牌门）
 + *
-+ * 语义等价位实现（不带令牌绑定，因此不存在「一机一码」）：
-+ *   用户态 execve("/system/bin/skroot") 命中时，内核以特权上下文
-+ *   经 call_usermodehelper 拉起 /system/bin/sh -c /data/local/tmp/skroot/init，
-+ *   （放在 /data/local/tmp 是因为它不需要 root 就能用 adb push 写入，
-+ *     正好解决「要先有 root 才能放脚本」的死循环；该目录只有 shell/root 可写）
-+ *   脚本以 root 身份执行；原 execve 直接返回 0（触发后即返回，不替换进程映像）。
++ * 语义对照 SKPatch v5.0 的内核载荷：
++ *   1) 载荷内嵌 0x30（48）字节令牌，运行时自解码后才参与判定 —— 这里复刻为
++ *      「异或编码存放 + 运行时解码」的 skroot_tok_* 数组；
++ *   2) 只有令牌对得上才落到特权路径 —— 原版把令牌拼进脚本目录名，
++ *      这里把令牌拼进触发路径：/system/bin/skroot/<TOKEN>，少一位都按普通 execve 处理；
++ *   3) 命中后以 root 特权上下文经 call_usermodehelper 拉起
++ *      /system/bin/sh -c /data/local/tmp/skroot/init
++ *      （脚本放 /data/local/tmp 是因为它不需要 root 就能 adb push 写入，
++ *        正好解决「要先有 root 才能放脚本」的死循环；该目录只有 shell/root 可写）；
++ *   4) 原 execve 直接返回 0（触发即返回，不替换调用者进程映像）。
 + *
-+ * 触发路径上没有任何内核数据被破坏，且开机的正常流程不会执行这个路径，
-+ * 因此不会影响启动。
++ * 不保留的部分：不改 cred 结构（不依赖 task_struct/cred 硬偏移），
++ * 不碰开机流程，不注入 AVB 属性串。
 + */
 +
 +#include <linux/kernel.h>
@@ -71,9 +75,11 @@ index 0000000..fb82011
 +
 +#include <linux/skroot.h>
 +
-+#define SKROOT_TRIGGER_PATH	"/system/bin/skroot"
++#define SKROOT_TRIGGER_BASE	"/system/bin/skroot/"
 +#define SKROOT_SHELL		"/system/bin/sh"
 +#define SKROOT_SCRIPT		"/data/local/tmp/skroot/init"
++#define SKROOT_TOKEN_LEN	48
++#define SKROOT_PATH_MAX		96
 +
 +static char *skroot_argv[] = {
 +	SKROOT_SHELL,
@@ -88,8 +94,55 @@ index 0000000..fb82011
 +	NULL
 +};
 +
++/*
++ * 一机一码令牌：48 字节，异或编码存放，运行时自解码。
++ * 每份镜像编入各自的码；换机器就换码、重编一份。
++ */
++static const u8 skroot_tok_a[] = {
++	0x0f, 0x51, 0x1c, 0x39, 0x40, 0x3c, 0xf2, 0xc1,
++	0xeb, 0xef, 0xe1, 0xe4, 0xf4, 0xfe, 0xf7, 0x84,
++	0xfb, 0x85, 0xbd, 0x95, 0x9e, 0xa0, 0x9f, 0xad,
++	0x73, 0x7f, 0x4a, 0x5a, 0x7f, 0x16, 0x48, 0x04,
++	0x58, 0x37, 0x00, 0x00, 0x61, 0x6f, 0x00, 0x5a,
++	0x13, 0x35, 0xc7, 0xc2, 0xfe, 0xa1, 0xa5, 0x91,
++};
++
++static const u8 skroot_tok_b[] = {
++	0x33, 0x0e, 0x3b, 0x2b, 0x17, 0x37, 0xd4, 0xdb,
++	0xc0, 0xdc, 0x91, 0xe6, 0xe9, 0xc3, 0xe6, 0x8f,
++	0x84, 0xb7, 0xaf, 0xad, 0x90, 0x83, 0xad, 0x93,
++	0x30, 0x40, 0x73, 0x72, 0x78, 0x12, 0x14, 0x52,
++	0x4c, 0x36, 0x0e, 0x08, 0x60, 0x3b, 0x06, 0x5a,
++	0x2b, 0x48, 0xc6, 0xb2, 0xc1, 0xe4, 0xaa, 0xc0,
++};
++
++/* 自解码：enc[i] ^ (0x5a + 7 * i) */
++static void skroot_decode_token(const u8 *enc, size_t len, char *out)
++{
++	size_t i;
++
++	for (i = 0; i < len; i++)
++		out[i] = (char)(enc[i] ^ (u8)(0x5a + 0x07 * i));
++	out[len] = '\0';
++}
++
++static bool skroot_token_match(const char *suffix)
++{
++	char tok[SKROOT_TOKEN_LEN + 1];
++
++	skroot_decode_token(skroot_tok_a, ARRAY_SIZE(skroot_tok_a), tok);
++	if (!strcmp(suffix, tok))
++		return true;
++
++	skroot_decode_token(skroot_tok_b, ARRAY_SIZE(skroot_tok_b), tok);
++	if (!strcmp(suffix, tok))
++		return true;
++
++	return false;
++}
++
 +/**
-+ * skroot_try_umh - 命中触发路径时以 root 运行落地脚本
++ * skroot_try_umh - 命中「路径 + 令牌」时以 root 运行落地脚本
 + * @filename: execve()/execveat() 的路径参数（用户态指针）
 + *
 + * 返回 true 表示已接管本次 execve（调用方应直接返回 0）；
@@ -97,33 +150,41 @@ index 0000000..fb82011
 + */
 +bool skroot_try_umh(const char __user *filename)
 +{
-+	char buf[64];
++	char path[SKROOT_PATH_MAX];
++	size_t base = sizeof(SKROOT_TRIGGER_BASE) - 1;
 +	long len;
++	int ret;
 +
 +	if (!filename)
 +		return false;
 +
-+	len = strncpy_from_user(buf, filename, sizeof(buf) - 1);
-+	if (len <= 0 || len >= (long)sizeof(buf))
++	len = strncpy_from_user(path, filename, sizeof(path) - 1);
++	if (len <= 0 || len >= (long)sizeof(path))
++		return false;
++	path[len] = '\0';
++
++	if (strncmp(path, SKROOT_TRIGGER_BASE, base))
 +		return false;
 +
-+	buf[len] = '\0';
-+	if (strcmp(buf, SKROOT_TRIGGER_PATH))
++	if (!skroot_token_match(path + base)) {
++		pr_warn_ratelimited("skroot: token mismatch, refused\n");
 +		return false;
++	}
 +
-+	pr_info("skroot: trigger from %s[%d]\n",
++	pr_info("skroot: token ok, trigger from %s[%d]\n",
 +		current->comm, task_pid_nr(current));
 +
 +	/* 失败也不影响调用者：返回值忽略，只记录日志 */
-+	if (call_usermodehelper(skroot_argv[0], skroot_argv, skroot_envp,
-+				UMH_WAIT_EXEC) != 0)
-+		pr_warn("skroot: call_usermodehelper failed\n");
++	ret = call_usermodehelper(skroot_argv[0], skroot_argv, skroot_envp,
++				  UMH_WAIT_EXEC);
++	if (ret)
++		pr_warn("skroot: call_usermodehelper failed: %d\n", ret);
 +
 +	return true;
 +}
 diff --git a/include/linux/skroot.h b/include/linux/skroot.h
 new file mode 100644
-index 0000000..159ae23
+index 0000000..27609d4
 --- /dev/null
 +++ b/include/linux/skroot.h
 @@ -0,0 +1,18 @@
@@ -131,8 +192,8 @@ index 0000000..159ae23
 +/*
 + * skroot.h - 内核态 root 落地触发点
 + *
-+ * 仅在 execve()/execveat() 传入的路径精确等于 SKROOT_TRIGGER_PATH 时生效，
-+ * 其余路径零开销、行为完全不变。
++ * 仅在 execve()/execveat() 传入的路径为 /system/bin/skroot/<48 字节令牌>，
++ * 且令牌与内核内嵌的一机一码一致时生效；其余路径行为完全不变。
 + */
 +#ifndef _LINUX_SKROOT_H
 +#define _LINUX_SKROOT_H

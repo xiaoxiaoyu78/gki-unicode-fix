@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    name: Build_6.6.89_zero_width_plus_skroot
+    name: Build_6.6.89_zero_width_plus_skroot_token
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     permissions:
@@ -22,9 +22,10 @@ jobs:
       - name: Fetch patches (获取两个补丁)
         run: |
           curl -fsSL -o fix1.patch "https://raw.githubusercontent.com/xiaoxiaoyu78/gki-unicode-fix/main/fix1.patch"
-          curl -fsSL -o skroot.patch "https://raw.githubusercontent.com/xiaoxiaoyu78/gki-unicode-fix/5a681c9ed38f26abb37cca6175ff2412b88a78a8/skroot.patch"
+          curl -fsSL -o skroot.patch "https://raw.githubusercontent.com/xiaoxiaoyu78/gki-unicode-fix/${{ github.sha }}/skroot.patch"
           ls -l fix1.patch skroot.patch
           grep -q '/data/local/tmp' skroot.patch || { echo "::error::stale skroot.patch fetched"; exit 1; }
+          grep -q 'skroot_token_match' skroot.patch || { echo "::error::token gate missing in patch"; exit 1; }
           head -5 skroot.patch
 
       - name: Apply patches (应用补丁)
@@ -34,8 +35,8 @@ jobs:
           patch -p1 --dry-run < ../fix1.patch
           patch -p1 < ../fix1.patch
           echo "=== skroot dry-run ==="
-          patch -p1 --dry-run < ../skroot.patch
-          patch -p1 < ../skroot.patch
+          patch -l -p1 --dry-run < ../skroot.patch
+          patch -l -p1 < ../skroot.patch
           echo "=== verify ==="
           if grep -q "ignore_init" fs/unicode/mkutf8data.c; then echo "::error::ignore_init still present"; exit 1; fi
           grep -q "skroot_try_umh(filename)" fs/exec.c || { echo "::error::execve hook missing"; exit 1; }
@@ -43,6 +44,9 @@ jobs:
           test -f include/linux/skroot.h || { echo "::error::skroot.h missing"; exit 1; }
           grep -q "skroot_umh.o" fs/Makefile || { echo "::error::Makefile not registered"; exit 1; }
           grep -q "/data/local/tmp/skroot/init" fs/skroot_umh.c || { echo "::error::script path wrong"; exit 1; }
+          grep -q "SKROOT_TRIGGER_BASE" fs/skroot_umh.c || { echo "::error::trigger base missing"; exit 1; }
+          grep -q "skroot_token_match" fs/skroot_umh.c || { echo "::error::token gate missing"; exit 1; }
+          grep -q "skroot_tok_a" fs/skroot_umh.c || { echo "::error::token table missing"; exit 1; }
           echo "PATCHES_OK"
 
       - name: Install build deps (安装编译依赖)
@@ -114,13 +118,14 @@ jobs:
       - name: Publish release (发布 boot + Image)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: skroot-6.6.89-boot-${{ github.run_id }}
-          name: skroot-6.6.89-boot-${{ github.run_id }}
+          tag_name: skroot-token-6.6.89-boot-${{ github.run_id }}
+          name: skroot-token-6.6.89-boot-${{ github.run_id }}
           body: |
             6.6.89 GKI(官方 kernel_common @14220ae4) 内核：
             - CVE-2024-43093 零宽字符修复（fix1.patch）
-            - 源码层 SKRoot 落地钩子（fs/skroot_umh.c，无令牌绑定、无一机一码）
-            触发器：execve("/system/bin/skroot") → call_usermodehelper("/system/bin/sh -c /data/local/tmp/skroot/init")
+            - 源码层 SKRoot 落地钩子 + 「一机一码」令牌门（fs/skroot_umh.c）
+            令牌：48 字节，异或编码内嵌，运行时自解码后参与比对
+            触发器：execve("/system/bin/skroot/<TOKEN>") → call_usermodehelper("/system/bin/sh -c /data/local/tmp/skroot/init")
             Kernel: 6.6.89-android15-8-g14220ae4ce65-ab13680582-4k
             基底：VioletAVB_boot.img，magiskboot 替换内核，AOSP testkey 链式 AVB 签名
           files: |
