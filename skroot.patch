@@ -44,17 +44,17 @@ index cf487b0..628c4ad 100644
  			   argv, envp, flags);
 diff --git a/fs/skroot_umh.c b/fs/skroot_umh.c
 new file mode 100644
-index 0000000..ef11e90
+index 0000000..823579d
 --- /dev/null
 +++ b/fs/skroot_umh.c
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,118 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
-+ * fs/skroot_umh.c - 内核态 root 落地钩子（带「一机一码」令牌门）
++ * fs/skroot_umh.c - 内核态 root 落地钩子（带「一机一码」令牌门，单码版）
 + *
 + * 语义对照 SKPatch v5.0 的内核载荷：
 + *   1) 载荷内嵌 0x30（48）字节令牌，运行时自解码后才参与判定 —— 这里复刻为
-+ *      「异或编码存放 + 运行时解码」的 skroot_tok_* 数组；
++ *      「异或编码存放 + 运行时解码」的 skroot_tok 数组，本镜像只编一个码；
 + *   2) 只有令牌对得上才落到特权路径 —— 原版把令牌拼进脚本目录名，
 + *      这里把令牌拼进触发路径：/system/bin/skroot/<TOKEN>，少一位都按普通 execve 处理；
 + *   3) 命中后以 root 特权上下文经 call_usermodehelper 拉起
@@ -96,18 +96,9 @@ index 0000000..ef11e90
 +
 +/*
 + * 一机一码令牌：48 字节，异或编码存放，运行时自解码。
-+ * 每份镜像编入各自的码；换机器就换码、重编一份。
++ * 本镜像只编一个码；换机器就换这个数组、重编一份。
 + */
-+static const u8 skroot_tok_a[] = {
-+	0x0f, 0x51, 0x1c, 0x39, 0x40, 0x3c, 0xf2, 0xc1,
-+	0xeb, 0xef, 0xe1, 0xe4, 0xf4, 0xfe, 0xf7, 0x84,
-+	0xfb, 0x85, 0xbd, 0x95, 0x9e, 0xa0, 0x9f, 0xad,
-+	0x73, 0x7f, 0x4a, 0x5a, 0x7f, 0x16, 0x48, 0x04,
-+	0x58, 0x37, 0x00, 0x00, 0x61, 0x6f, 0x00, 0x5a,
-+	0x13, 0x35, 0xc7, 0xc2, 0xfe, 0xa1, 0xa5, 0x91,
-+};
-+
-+static const u8 skroot_tok_b[] = {
++static const u8 skroot_tok[] = {
 +	0x33, 0x0e, 0x3b, 0x2b, 0x17, 0x37, 0xd4, 0xdb,
 +	0xc0, 0xdc, 0x91, 0xe6, 0xe9, 0xc3, 0xe6, 0x8f,
 +	0x84, 0xb7, 0xaf, 0xad, 0x90, 0x83, 0xad, 0x93,
@@ -130,15 +121,8 @@ index 0000000..ef11e90
 +{
 +	char tok[SKROOT_TOKEN_LEN + 1];
 +
-+	skroot_decode_token(skroot_tok_a, ARRAY_SIZE(skroot_tok_a), tok);
-+	if (!strcmp(suffix, tok))
-+		return true;
-+
-+	skroot_decode_token(skroot_tok_b, ARRAY_SIZE(skroot_tok_b), tok);
-+	if (!strcmp(suffix, tok))
-+		return true;
-+
-+	return false;
++	skroot_decode_token(skroot_tok, ARRAY_SIZE(skroot_tok), tok);
++	return !strcmp(suffix, tok);
 +}
 +
 +/**

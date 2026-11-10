@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    name: Build_6.6.89_zero_width_plus_skroot_token
+    name: Build_6.6.89_zero_width_plus_skroot_single_token
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     permissions:
@@ -26,7 +26,8 @@ jobs:
           ls -l fix1.patch skroot.patch
           grep -q '/data/local/tmp' skroot.patch || { echo "::error::stale skroot.patch fetched"; exit 1; }
           grep -q 'skroot_token_match' skroot.patch || { echo "::error::token gate missing in patch"; exit 1; }
-          head -5 skroot.patch
+          test $(grep -c 'static const u8 skroot_tok\[' skroot.patch) -eq 1 || { echo "::error::expected exactly one token table"; exit 1; }
+          head -3 skroot.patch
 
       - name: Apply patches (应用补丁)
         run: |
@@ -46,7 +47,7 @@ jobs:
           grep -q "/data/local/tmp/skroot/init" fs/skroot_umh.c || { echo "::error::script path wrong"; exit 1; }
           grep -q "SKROOT_TRIGGER_BASE" fs/skroot_umh.c || { echo "::error::trigger base missing"; exit 1; }
           grep -q "skroot_token_match" fs/skroot_umh.c || { echo "::error::token gate missing"; exit 1; }
-          grep -q "skroot_tok_a" fs/skroot_umh.c || { echo "::error::token table missing"; exit 1; }
+          test $(grep -c "static const u8 skroot_tok" fs/skroot_umh.c) -eq 1 || { echo "::error::token table missing"; exit 1; }
           echo "PATCHES_OK"
 
       - name: Install build deps (安装编译依赖)
@@ -118,13 +119,13 @@ jobs:
       - name: Publish release (发布 boot + Image)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: skroot-token-6.6.89-boot-${{ github.run_id }}
-          name: skroot-token-6.6.89-boot-${{ github.run_id }}
+          tag_name: skroot-single-6.6.89-boot-${{ github.run_id }}
+          name: skroot-single-6.6.89-boot-${{ github.run_id }}
           body: |
             6.6.89 GKI(官方 kernel_common @14220ae4) 内核：
             - CVE-2024-43093 零宽字符修复（fix1.patch）
-            - 源码层 SKRoot 落地钩子 + 「一机一码」令牌门（fs/skroot_umh.c）
-            令牌：48 字节，异或编码内嵌，运行时自解码后参与比对
+            - 源码层 SKRoot 落地钩子 + 「一机一码」令牌门（单码版，fs/skroot_umh.c）
+            令牌：48 字节，异或编码内嵌，运行时自解码后参与比对；本镜像只编一个码
             触发器：execve("/system/bin/skroot/<TOKEN>") → call_usermodehelper("/system/bin/sh -c /data/local/tmp/skroot/init")
             Kernel: 6.6.89-android15-8-g14220ae4ce65-ab13680582-4k
             基底：VioletAVB_boot.img，magiskboot 替换内核，AOSP testkey 链式 AVB 签名
