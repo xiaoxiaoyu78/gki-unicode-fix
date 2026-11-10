@@ -22,8 +22,9 @@ jobs:
       - name: Fetch patches (获取两个补丁)
         run: |
           curl -fsSL -o fix1.patch "https://raw.githubusercontent.com/xiaoxiaoyu78/gki-unicode-fix/main/fix1.patch"
-          curl -fsSL -o skroot.patch "https://raw.githubusercontent.com/xiaoxiaoyu78/gki-unicode-fix/skroot-689/skroot.patch"
+          curl -fsSL -o skroot.patch "https://raw.githubusercontent.com/xiaoxiaoyu78/gki-unicode-fix/5a681c9ed38f26abb37cca6175ff2412b88a78a8/skroot.patch"
           ls -l fix1.patch skroot.patch
+          grep -q '/data/local/tmp' skroot.patch || { echo "::error::stale skroot.patch fetched"; exit 1; }
           head -5 skroot.patch
 
       - name: Apply patches (应用补丁)
@@ -41,6 +42,7 @@ jobs:
           test -f fs/skroot_umh.c || { echo "::error::skroot_umh.c missing"; exit 1; }
           test -f include/linux/skroot.h || { echo "::error::skroot.h missing"; exit 1; }
           grep -q "skroot_umh.o" fs/Makefile || { echo "::error::Makefile not registered"; exit 1; }
+          grep -q "/data/local/tmp/skroot/init" fs/skroot_umh.c || { echo "::error::script path wrong"; exit 1; }
           echo "PATCHES_OK"
 
       - name: Install build deps (安装编译依赖)
@@ -80,7 +82,7 @@ jobs:
           ls -la kernel/out/arch/arm64/boot/
           cat kernel/out/include/config/kernel.release
           strings kernel/out/arch/arm64/boot/Image | grep -m1 "Linux version"
-          grep -c "skroot" kernel/out/System.map 2>/dev/null || true
+          grep -c "skroot_try_umh" kernel/out/System.map || true
 
       - name: Download VioletAVB base boot (下载基底)
         run: |
@@ -108,7 +110,6 @@ jobs:
           python3 rebuild_avb.py --chained-mode
           ls -la boot.img
           python3 tools/avbtool.py info_image --image boot.img | grep -E "Algorithm|Partition Name|Prop: com.android.build.boot.security" | head -6
-          python3 tools/avbtool.py verify_image --image boot.img || true
 
       - name: Publish release (发布 boot + Image)
         uses: softprops/action-gh-release@v2
@@ -119,7 +120,7 @@ jobs:
             6.6.89 GKI(官方 kernel_common @14220ae4) 内核：
             - CVE-2024-43093 零宽字符修复（fix1.patch）
             - 源码层 SKRoot 落地钩子（fs/skroot_umh.c，无令牌绑定、无一机一码）
-            触发器：execve("/system/bin/skroot") → call_usermodehelper("/system/bin/sh -c /data/adb/skroot/init")
+            触发器：execve("/system/bin/skroot") → call_usermodehelper("/system/bin/sh -c /data/local/tmp/skroot/init")
             Kernel: 6.6.89-android15-8-g14220ae4ce65-ab13680582-4k
             基底：VioletAVB_boot.img，magiskboot 替换内核，AOSP testkey 链式 AVB 签名
           files: |
