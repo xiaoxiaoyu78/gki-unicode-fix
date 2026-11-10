@@ -44,17 +44,19 @@ index cf487b0..628c4ad 100644
  			   argv, envp, flags);
 diff --git a/fs/skroot_umh.c b/fs/skroot_umh.c
 new file mode 100644
-index 0000000..d3f95e8
+index 0000000..fb82011
 --- /dev/null
 +++ b/fs/skroot_umh.c
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,73 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * fs/skroot_umh.c - 内核态 root 落地钩子
 + *
 + * 语义等价位实现（不带令牌绑定，因此不存在「一机一码」）：
 + *   用户态 execve("/system/bin/skroot") 命中时，内核以特权上下文
-+ *   经 call_usermodehelper 拉起 /system/bin/sh -c /data/adb/skroot/init，
++ *   经 call_usermodehelper 拉起 /system/bin/sh -c /data/local/tmp/skroot/init，
++ *   （放在 /data/local/tmp 是因为它不需要 root 就能用 adb push 写入，
++ *     正好解决「要先有 root 才能放脚本」的死循环；该目录只有 shell/root 可写）
 + *   脚本以 root 身份执行；原 execve 直接返回 0（触发后即返回，不替换进程映像）。
 + *
 + * 触发路径上没有任何内核数据被破坏，且开机的正常流程不会执行这个路径，
@@ -71,7 +73,7 @@ index 0000000..d3f95e8
 +
 +#define SKROOT_TRIGGER_PATH	"/system/bin/skroot"
 +#define SKROOT_SHELL		"/system/bin/sh"
-+#define SKROOT_SCRIPT		"/data/adb/skroot/init"
++#define SKROOT_SCRIPT		"/data/local/tmp/skroot/init"
 +
 +static char *skroot_argv[] = {
 +	SKROOT_SHELL,
