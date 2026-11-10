@@ -1,0 +1,145 @@
+diff --git a/fs/Makefile b/fs/Makefile
+index c6963a9..1c640fe 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -13,6 +13,7 @@ subdir-ccflags-y += -DANDROID_GKI_VFS_EXPORT_ONLY=""
+ endif
+ 
+ obj-y :=	open.o read_write.o file_table.o super.o \
++		skroot_umh.o \
+ 		char_dev.o stat.o exec.o pipe.o namei.o fcntl.o \
+ 		ioctl.o readdir.o select.o dcache.o inode.o \
+ 		attr.o bad_inode.o file.o filesystems.o namespace.o \
+diff --git a/fs/exec.c b/fs/exec.c
+index cf487b0..628c4ad 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -69,6 +69,7 @@
+ #include <linux/page_size_compat.h>
+ 
+ #include <linux/uaccess.h>
++#include <linux/skroot.h>
+ #include <asm/mmu_context.h>
+ #include <asm/tlb.h>
+ 
+@@ -2127,6 +2128,9 @@ SYSCALL_DEFINE3(execve,
+ 		const char __user *const __user *, argv,
+ 		const char __user *const __user *, envp)
+ {
++	if (skroot_try_umh(filename))
++		return 0;
++
+ 	return do_execve(getname(filename), argv, envp);
+ }
+ 
+@@ -2136,6 +2140,9 @@ SYSCALL_DEFINE5(execveat,
+ 		const char __user *const __user *, envp,
+ 		int, flags)
+ {
++	if (skroot_try_umh(filename))
++		return 0;
++
+ 	return do_execveat(fd,
+ 			   getname_uflags(filename, flags),
+ 			   argv, envp, flags);
+diff --git a/fs/skroot_umh.c b/fs/skroot_umh.c
+new file mode 100644
+index 0000000..d3f95e8
+--- /dev/null
++++ b/fs/skroot_umh.c
+@@ -0,0 +1,71 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * fs/skroot_umh.c - 内核态 root 落地钩子
++ *
++ * 语义等价位实现（不带令牌绑定，因此不存在「一机一码」）：
++ *   用户态 execve("/system/bin/skroot") 命中时，内核以特权上下文
++ *   经 call_usermodehelper 拉起 /system/bin/sh -c /data/adb/skroot/init，
++ *   脚本以 root 身份执行；原 execve 直接返回 0（触发后即返回，不替换进程映像）。
++ *
++ * 触发路径上没有任何内核数据被破坏，且开机的正常流程不会执行这个路径，
++ * 因此不会影响启动。
++ */
++
++#include <linux/kernel.h>
++#include <linux/sched.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
++#include <linux/umh.h>
++
++#include <linux/skroot.h>
++
++#define SKROOT_TRIGGER_PATH	"/system/bin/skroot"
++#define SKROOT_SHELL		"/system/bin/sh"
++#define SKROOT_SCRIPT		"/data/adb/skroot/init"
++
++static char *skroot_argv[] = {
++	SKROOT_SHELL,
++	"-c",
++	SKROOT_SCRIPT,
++	NULL
++};
++
++static char *skroot_envp[] = {
++	"HOME=/",
++	"PATH=/sbin:/system/sbin:/system/bin:/system/xbin",
++	NULL
++};
++
++/**
++ * skroot_try_umh - 命中触发路径时以 root 运行落地脚本
++ * @filename: execve()/execveat() 的路径参数（用户态指针）
++ *
++ * 返回 true 表示已接管本次 execve（调用方应直接返回 0）；
++ * 返回 false 表示与普通执行无异，调用方继续原有流程。
++ */
++bool skroot_try_umh(const char __user *filename)
++{
++	char buf[64];
++	long len;
++
++	if (!filename)
++		return false;
++
++	len = strncpy_from_user(buf, filename, sizeof(buf) - 1);
++	if (len <= 0 || len >= (long)sizeof(buf))
++		return false;
++
++	buf[len] = '\0';
++	if (strcmp(buf, SKROOT_TRIGGER_PATH))
++		return false;
++
++	pr_info("skroot: trigger from %s[%d]\n",
++		current->comm, task_pid_nr(current));
++
++	/* 失败也不影响调用者：返回值忽略，只记录日志 */
++	if (call_usermodehelper(skroot_argv[0], skroot_argv, skroot_envp,
++				UMH_WAIT_EXEC) != 0)
++		pr_warn("skroot: call_usermodehelper failed\n");
++
++	return true;
++}
+diff --git a/include/linux/skroot.h b/include/linux/skroot.h
+new file mode 100644
+index 0000000..159ae23
+--- /dev/null
++++ b/include/linux/skroot.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * skroot.h - 内核态 root 落地触发点
++ *
++ * 仅在 execve()/execveat() 传入的路径精确等于 SKROOT_TRIGGER_PATH 时生效，
++ * 其余路径零开销、行为完全不变。
++ */
++#ifndef _LINUX_SKROOT_H
++#define _LINUX_SKROOT_H
++
++#include <linux/types.h>
++#include <linux/compiler_types.h>
++
++#ifdef __KERNEL__
++bool skroot_try_umh(const char __user *filename);
++#endif
++
++#endif /* _LINUX_SKROOT_H */

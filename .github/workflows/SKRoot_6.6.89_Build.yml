@@ -1,0 +1,128 @@
+name: SKRoot_6.6.89_Build
+
+on:
+  push:
+    branches: [skroot-689]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build_6.6.89_zero_width_plus_skroot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: aosp-mirror/kernel_common
+          ref: 14220ae4ce65ba58711f65587ef4e93f408892fb
+          path: kernel
+
+      - name: Fetch patches (获取两个补丁)
+        run: |
+          curl -fsSL -o fix1.patch "https://raw.githubusercontent.com/xiaoxiaoyu78/gki-unicode-fix/main/fix1.patch"
+          curl -fsSL -o skroot.patch "https://raw.githubusercontent.com/xiaoxiaoyu78/gki-unicode-fix/skroot-689/skroot.patch"
+          ls -l fix1.patch skroot.patch
+          head -5 skroot.patch
+
+      - name: Apply patches (应用补丁)
+        run: |
+          cd kernel
+          echo "=== fix1 dry-run ==="
+          patch -p1 --dry-run < ../fix1.patch
+          patch -p1 < ../fix1.patch
+          echo "=== skroot dry-run ==="
+          patch -p1 --dry-run < ../skroot.patch
+          patch -p1 < ../skroot.patch
+          echo "=== verify ==="
+          if grep -q "ignore_init" fs/unicode/mkutf8data.c; then echo "::error::ignore_init still present"; exit 1; fi
+          grep -q "skroot_try_umh(filename)" fs/exec.c || { echo "::error::execve hook missing"; exit 1; }
+          test -f fs/skroot_umh.c || { echo "::error::skroot_umh.c missing"; exit 1; }
+          test -f include/linux/skroot.h || { echo "::error::skroot.h missing"; exit 1; }
+          grep -q "skroot_umh.o" fs/Makefile || { echo "::error::Makefile not registered"; exit 1; }
+          echo "PATCHES_OK"
+
+      - name: Install build deps (安装编译依赖)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q flex bison bc cpio lz4 zstd xz-utils python3 file gawk dwarves libssl-dev libelf-dev libncurses-dev clang lld llvm
+
+      - name: Check toolchain
+        run: |
+          clang --version | head -1
+          ld.lld --version | head -1
+
+      - name: Configure gki_defconfig (配置官方默认配置)
+        run: |
+          cd kernel
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out gki_defconfig
+          scripts/config --file out/.config --disable LOCALVERSION_AUTO
+          scripts/config --file out/.config --set-str LOCALVERSION ""
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out olddefconfig
+          grep -E '^#? ?CONFIG_LOCALVERSION' out/.config || true
+
+      - name: Assert kernel release string (校验内核版本字符串)
+        run: |
+          cd kernel
+          REL=$(make --no-print-directory ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out kernelrelease LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k" 2>/dev/null)
+          echo "KERNEL_RELEASE=$REL"
+          echo "$REL" | grep -qE '^6\.6\.89.*android15-8-g14220ae4ce65-ab13680582-4k.*$' || { echo "::error::Release mismatch: $REL"; exit 1; }
+          echo "RELEASE_OK"
+
+      - name: Build kernel (编译内核)
+        run: |
+          cd kernel
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out -j$(nproc) LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k"
+
+      - name: Show artifacts (查看产物)
+        run: |
+          ls -la kernel/out/arch/arm64/boot/
+          cat kernel/out/include/config/kernel.release
+          strings kernel/out/arch/arm64/boot/Image | grep -m1 "Linux version"
+          grep -c "skroot" kernel/out/System.map 2>/dev/null || true
+
+      - name: Download VioletAVB base boot (下载基底)
+        run: |
+          curl -fsSL -o VioletAVB_boot.img "https://aka.doubaocdn.com/s/JLSTVbGrXV"
+          ls -l VioletAVB_boot.img
+          test $(stat -c%s VioletAVB_boot.img) -eq 100663296 || { echo "::error::base size unexpected"; exit 1; }
+
+      - name: Repack with magiskboot (替换内核)
+        run: |
+          curl -fsSL -o avb.tar.gz "https://github.com/showdo/AOSP-Testkey-BootSigner/archive/refs/heads/main.tar.gz"
+          tar -xzf avb.tar.gz
+          chmod +x AOSP-Testkey-BootSigner-main/tools/magiskboot
+          mkdir -p work && cp VioletAVB_boot.img work/boot.img
+          cd work
+          ../AOSP-Testkey-BootSigner-main/tools/magiskboot unpack boot.img
+          rm -f kernel && cp ../kernel/out/arch/arm64/boot/Image kernel
+          ../AOSP-Testkey-BootSigner-main/tools/magiskboot repack boot.img
+          ls -la new-boot.img
+          cp new-boot.img ../AOSP-Testkey-BootSigner-main/boot.img
+          cd ..
+
+      - name: AVB sign (AVB 链式签名)
+        run: |
+          cd AOSP-Testkey-BootSigner-main
+          python3 rebuild_avb.py --chained-mode
+          ls -la boot.img
+          python3 tools/avbtool.py info_image --image boot.img | grep -E "Algorithm|Partition Name|Prop: com.android.build.boot.security" | head -6
+          python3 tools/avbtool.py verify_image --image boot.img || true
+
+      - name: Publish release (发布 boot + Image)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: skroot-6.6.89-boot-${{ github.run_id }}
+          name: skroot-6.6.89-boot-${{ github.run_id }}
+          body: |
+            6.6.89 GKI(官方 kernel_common @14220ae4) 内核：
+            - CVE-2024-43093 零宽字符修复（fix1.patch）
+            - 源码层 SKRoot 落地钩子（fs/skroot_umh.c，无令牌绑定、无一机一码）
+            触发器：execve("/system/bin/skroot") → call_usermodehelper("/system/bin/sh -c /data/adb/skroot/init")
+            Kernel: 6.6.89-android15-8-g14220ae4ce65-ab13680582-4k
+            基底：VioletAVB_boot.img，magiskboot 替换内核，AOSP testkey 链式 AVB 签名
+          files: |
+            AOSP-Testkey-BootSigner-main/boot.img
+            kernel/out/arch/arm64/boot/Image
+          fail_on_unmatched: false
