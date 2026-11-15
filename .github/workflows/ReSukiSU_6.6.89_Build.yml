@@ -1,0 +1,162 @@
+name: ReSukiSU_6.6.89_Build
+
+on:
+  push:
+    branches: [resukisu-689]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build_6.6.89_zerowidth_resukisu_plus_skroot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout GKI 6.6.89 kernel (官方 kernel_common)
+        uses: actions/checkout@v4
+        with:
+          repository: aosp-mirror/kernel_common
+          ref: 14220ae4ce65ba58711f65587ef4e93f408892fb
+          path: kernel
+
+      - name: Fetch patches (拉取零宽修复 + SKRoot 令牌补丁)
+        run: |
+          curl -fsSL -o fix1.patch "https://raw.githubusercontent.com/xiaoxiaoyu78/gki-unicode-fix/main/fix1.patch"
+          curl -fsSL -o skroot.patch "https://raw.githubusercontent.com/xiaoxiaoyu78/gki-unicode-fix/${{ github.sha }}/skroot.patch"
+          ls -l fix1.patch skroot.patch
+          grep -q '/data/local/tmp' skroot.patch || { echo "::error::stale skroot.patch fetched"; exit 1; }
+          grep -q 'skroot_token_match' skroot.patch || { echo "::error::token gate missing in patch"; exit 1; }
+          test $(grep -c 'static const u8 skroot_tok\[' skroot.patch) -eq 1 || { echo "::error::expected exactly one token table"; exit 1; }
+
+      - name: Apply patches (应用补丁)
+        run: |
+          cd kernel
+          echo "=== fix1 dry-run ==="
+          patch -p1 --dry-run < ../fix1.patch
+          patch -p1 < ../fix1.patch
+          echo "=== skroot dry-run ==="
+          patch -l -p1 --dry-run < ../skroot.patch
+          patch -l -p1 < ../skroot.patch
+          echo "=== verify ==="
+          if grep -q "ignore_init" fs/unicode/mkutf8data.c; then echo "::error::ignore_init still present"; exit 1; fi
+          grep -q "skroot_try_umh(filename)" fs/exec.c || { echo "::error::execve hook missing"; exit 1; }
+          test -f fs/skroot_umh.c || { echo "::error::skroot_umh.c missing"; exit 1; }
+          test -f include/linux/skroot.h || { echo "::error::skroot.h missing"; exit 1; }
+          grep -q "skroot_umh.o" fs/Makefile || { echo "::error::Makefile not registered"; exit 1; }
+          grep -q "/data/local/tmp/skroot/init" fs/skroot_umh.c || { echo "::error::script path wrong"; exit 1; }
+          test $(grep -c "static const u8 skroot_tok" fs/skroot_umh.c) -eq 1 || { echo "::error::token table missing"; exit 1; }
+          echo "PATCHES_OK"
+
+      - name: Integrate ReSukiSU kernel code (集成 ReSukiSU)
+        run: |
+          git clone https://github.com/ReSukiSU/ReSukiSU KernelSU
+          echo "ReSukiSU commit: $(git -C KernelSU rev-parse HEAD)"
+          echo "ReSukiSU describe: $(git -C KernelSU describe --tags --always 2>/dev/null || echo unknown)"
+          test -d KernelSU/kernel || { echo "::error::KernelSU/kernel missing"; exit 1; }
+          test -f KernelSU/kernel/Kbuild || { echo "::error::KernelSU/kernel/Kbuild missing"; exit 1; }
+          cd kernel
+          ln -sfn ../KernelSU/kernel drivers/kernelsu
+          test -e drivers/kernelsu/Kbuild || { echo "::error::symlink target wrong"; exit 1; }
+          grep -q "kernelsu" drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || sed -i '1i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          tail -3 drivers/Makefile
+          head -3 drivers/Kconfig
+          echo "RESUKISU_LINK_OK"
+
+      - name: Install build deps (安装编译依赖)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q flex bison bc cpio lz4 zstd xz-utils python3 file gawk dwarves libssl-dev libelf-dev libncurses-dev clang lld llvm
+
+      - name: Check toolchain
+        run: |
+          clang --version | head -1
+          ld.lld --version | head -1
+          git --version
+
+      - name: Configure defconfig (KSU + 官方默认配置)
+        run: |
+          cd kernel
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out gki_defconfig
+          scripts/config --file out/.config --enable KSU
+          scripts/config --file out/.config --enable KALLSYMS_ALL
+          scripts/config --file out/.config --enable KSU_TRACEPOINT_HOOK
+          scripts/config --file out/.config --disable KSU_DEBUG
+          scripts/config --file out/.config --disable LOCALVERSION_AUTO
+          scripts/config --file out/.config --set-str LOCALVERSION ""
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out olddefconfig
+          grep -E '^CONFIG_(KSU|KALLSYMS_ALL|KSU_TRACEPOINT_HOOK)=' out/.config || { echo "::error::KSU config not applied"; exit 1; }
+          grep -E '^#? ?CONFIG_LOCALVERSION' out/.config || true
+
+      - name: Assert kernel release string (校验内核版本字符串)
+        run: |
+          cd kernel
+          REL=$(make --no-print-directory ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out kernelrelease LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k" 2>/dev/null)
+          echo "KERNEL_RELEASE=$REL"
+          echo "$REL" | grep -qE '^6\.6\.89.*android15-8-g14220ae4ce65-ab13680582-4k.*$' || { echo "::error::Release mismatch: $REL"; exit 1; }
+          echo "RELEASE_OK"
+
+      - name: Build kernel (编译内核)
+        run: |
+          cd kernel
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out -j$(nproc) LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k"
+
+      - name: Verify artifacts (校验产物)
+        run: |
+          cd kernel
+          ls -la out/arch/arm64/boot/
+          cat out/include/config/kernel.release
+          strings out/arch/arm64/boot/Image | grep -m1 "Linux version"
+          echo "--- ksu symbols ---"
+          grep -c 'ksu_' out/System.map || { echo "::error::ksu symbols missing"; exit 1; }
+          echo "--- skroot symbols ---"
+          grep -c "skroot_try_umh" out/System.map || { echo "::error::skroot missing"; exit 1; }
+          echo "--- ksu version strings ---"
+          strings out/arch/arm64/boot/Image | grep -iE 'bakasu|kernelsu' | head -5 || true
+
+      - name: Download VioletAVB base boot (下载基底)
+        run: |
+          curl -fsSL -o VioletAVB_boot.img "https://aka.doubaocdn.com/s/JLSTVbGrXV"
+          ls -l VioletAVB_boot.img
+          test $(stat -c%s VioletAVB_boot.img) -eq 100663296 || { echo "::error::base size unexpected"; exit 1; }
+
+      - name: Repack with magiskboot (替换内核)
+        run: |
+          curl -fsSL -o avb.tar.gz "https://github.com/showdo/AOSP-Testkey-BootSigner/archive/refs/heads/main.tar.gz"
+          tar -xzf avb.tar.gz
+          chmod +x AOSP-Testkey-BootSigner-main/tools/magiskboot
+          mkdir -p work && cp VioletAVB_boot.img work/boot.img
+          cd work
+          ../AOSP-Testkey-BootSigner-main/tools/magiskboot unpack boot.img
+          rm -f kernel && cp ../kernel/out/arch/arm64/boot/Image kernel
+          ../AOSP-Testkey-BootSigner-main/tools/magiskboot repack boot.img
+          ls -la new-boot.img
+          cp new-boot.img ../AOSP-Testkey-BootSigner-main/boot.img
+          cd ..
+
+      - name: AVB sign (AVB 链式签名)
+        run: |
+          cd AOSP-Testkey-BootSigner-main
+          python3 rebuild_avb.py --chained-mode
+          ls -la boot.img
+          python3 tools/avbtool.py info_image --image boot.img | grep -E "Algorithm|Partition Name|Prop: com.android.build.boot.security" | head -6
+
+      - name: Publish release (发布 boot + Image)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: resukisu-6.6.89-boot-${{ github.run_id }}
+          name: resukisu-6.6.89-boot-${{ github.run_id }}
+          body: |
+            6.6.89 GKI(官方 kernel_common @14220ae4) 内核：
+            - CVE-2024-43093 零宽字符修复（fix1.patch）
+            - ReSukiSU / BakaSU 内核代码（CONFIG_KSU, Tracepoint Syscall Redirect 钩子）
+            - 源码层 SKRoot 落地钩子 + 「一机一码」令牌门（单码版，fs/skroot_umh.c）
+            令牌：48 字节，异或编码内嵌，运行时自解码后参与比对；本镜像只编一个码
+            触发器：execve("/system/bin/skroot/<TOKEN>") -> call_usermodehelper("/system/bin/sh -c /data/local/tmp/skroot/init")
+            Kernel: 6.6.89-android15-8-g14220ae4ce65-ab13680582-4k
+            基底：VioletAVB_boot.img，magiskboot 替换内核，AOSP testkey 链式 AVB 签名
+          files: |
+            AOSP-Testkey-BootSigner-main/boot.img
+            kernel/out/arch/arm64/boot/Image
+          fail_on_unmatched: false
