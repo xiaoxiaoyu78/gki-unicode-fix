@@ -56,7 +56,7 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q flex bison bc cpio lz4 zstd xz-utils python3 file gawk dwarves libssl-dev libelf-dev libncurses-dev clang lld llvm
 
-      - name: Configure defconfig (KSU + SUSFS)
+      - name: Configure defconfig (KSU + SUSFS inline hook)
         run: |
           cd kernel
           make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out gki_defconfig
@@ -64,17 +64,16 @@ jobs:
           scripts/config --file out/.config --enable KPROBES
           scripts/config --file out/.config --enable EXT4_FS
           scripts/config --file out/.config --enable KALLSYMS
-          scripts/config --file out/.config --enable KSU_TRACEPOINT_HOOK
           scripts/config --file out/.config --enable KSU_SUSFS
           scripts/config --file out/.config --disable KSU_MANUAL_HOOK
           scripts/config --file out/.config --disable KSU_DEBUG
           scripts/config --file out/.config --disable LOCALVERSION_AUTO
           scripts/config --file out/.config --set-str LOCALVERSION ""
           make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out olddefconfig
-          grep -E "^CONFIG_(KSU|KSU_SUSFS|KSU_SUSFS_SUS_PATH|KSU_SUSFS_SUS_MOUNT|KSU_SUSFS_SUS_KSTAT|KSU_SUSFS_SPOOF_UNAME|KSU_SUSFS_ENABLE_LOG|KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS|KPROBES|EXT4_FS)" out/.config | sort
+          grep -E "^CONFIG_(KSU|KSU_SUSFS|KSU_SUSFS_SUS_PATH|KSU_SUSFS_SUS_MOUNT|KSU_SUSFS_SUS_KSTAT|KSU_SUSFS_SPOOF_UNAME|KSU_SUSFS_ENABLE_LOG|KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS|KSU_MANUAL_HOOK|KSU_TRACEPOINT_HOOK|KPROBES|EXT4_FS)" out/.config | sort
           grep -q "^CONFIG_KSU=y" out/.config
           grep -q "^CONFIG_KSU_SUSFS=y" out/.config
-          grep -q "^CONFIG_KSU_TRACEPOINT_HOOK=y" out/.config
+          ! grep -q "^CONFIG_KSU_MANUAL_HOOK=y" out/.config
 
       - name: Build kernel
         env:
@@ -141,7 +140,7 @@ jobs:
           body: |
             6.6.89 GKI (aosp-mirror/kernel_common @14220ae4):
             - CVE-2024-43093 zero-width fix
-            - ReSukiSU (BakaSU) v4.2.0-rc3 kernel driver (CONFIG_KSU=y, tracepoint hook)
+            - ReSukiSU (BakaSU) v4.2.0-rc3 kernel driver (CONFIG_KSU=y, SUSFS inline hook)
             - susfs4ksu gki-android15-6.6 kernel patches (CONFIG_KSU_SUSFS=y)
             Manager: ReSukiSU
           files: |
