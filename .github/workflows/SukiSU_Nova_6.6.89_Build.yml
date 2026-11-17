@@ -1,0 +1,155 @@
+name: SukiSU_Nova_6.6.89_Build
+
+on:
+  push:
+    branches: [resukisu-689]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build_6.6.89_zerowidth_skroot_sukisu_nova
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: aosp-mirror/kernel_common
+          ref: 14220ae4ce65ba58711f65587ef4e93f408892fb
+          path: kernel
+
+      - name: Fetch patches
+        run: |
+          curl -fsSL -o fix1.patch "https://raw.githubusercontent.com/xiaoxiaoyu78/gki-unicode-fix/main/fix1.patch"
+          curl -fsSL -o skroot.patch "https://raw.githubusercontent.com/xiaoxiaoyu78/gki-unicode-fix/${{ github.sha }}/skroot.patch"
+          ls -l fix1.patch skroot.patch
+          grep -q '/data/local/tmp' skroot.patch || { echo "::error::stale skroot.patch"; exit 1; }
+          grep -q 'skroot_token_match' skroot.patch || { echo "::error::token gate missing"; exit 1; }
+          test $(grep -c 'static const u8 skroot_tok\[' skroot.patch) -eq 1 || { echo "::error::expected exactly one token table"; exit 1; }
+
+      - name: Apply patches
+        run: |
+          cd kernel
+          echo "=== fix1 dry-run ==="
+          patch -p1 --dry-run < ../fix1.patch
+          patch -p1 < ../fix1.patch
+          echo "=== skroot dry-run ==="
+          patch -l -p1 --dry-run < ../skroot.patch
+          patch -l -p1 < ../skroot.patch
+          if grep -q "ignore_init" fs/unicode/mkutf8data.c; then echo "::error::ignore_init still present"; exit 1; fi
+          grep -q "skroot_try_umh(filename)" fs/exec.c || { echo "::error::execve hook missing"; exit 1; }
+          test -f fs/skroot_umh.c || exit 1
+          test -f include/linux/skroot.h || exit 1
+          grep -q "skroot_umh.o" fs/Makefile || exit 1
+          grep -q "/data/local/tmp/skroot/init" fs/skroot_umh.c || exit 1
+          test $(grep -c "static const u8 skroot_tok" fs/skroot_umh.c) -eq 1 || exit 1
+          echo PATCHES_OK
+
+      - name: Integrate SukiSU Nova kernel driver
+        run: |
+          cd kernel
+          git clone https://github.com/SukiSU-Nova/SukiSU-Nova KernelSU
+          sh KernelSU/kernel/setup.sh v3.0.0
+          echo "--- KSU HEAD ---"
+          git -C KernelSU log -1 --oneline
+          git -C KernelSU describe --tags --always
+          ls -l drivers/kernelsu
+          test -e drivers/kernelsu/Kbuild || { echo "::error::kernelsu symlink broken"; exit 1; }
+          grep -n kernelsu drivers/Makefile
+          grep -n kernelsu drivers/Kconfig
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q flex bison bc cpio lz4 zstd xz-utils python3 file gawk dwarves libssl-dev libelf-dev libncurses-dev clang lld llvm
+
+      - name: Configure defconfig
+        run: |
+          cd kernel
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out gki_defconfig
+          scripts/config --file out/.config --enable KSU
+          scripts/config --file out/.config --enable KPROBES
+          scripts/config --file out/.config --enable EXT4_FS
+          scripts/config --file out/.config --enable KALLSYMS
+          scripts/config --file out/.config --enable KALLSYMS_ALL
+          scripts/config --file out/.config --disable KSU_DEBUG
+          scripts/config --file out/.config --disable LOCALVERSION_AUTO
+          scripts/config --file out/.config --set-str LOCALVERSION ""
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out olddefconfig
+          echo "--- KSU config ---"
+          grep -E '^CONFIG_KSU=|^CONFIG_KSU_DEBUG=|^CONFIG_KPM=|^CONFIG_KPROBES=|^CONFIG_EXT4_FS=|^CONFIG_KALLSYMS' out/.config
+          grep -q '^CONFIG_KSU=y' out/.config || { echo "::error::CONFIG_KSU not enabled"; exit 1; }
+          grep -q '^CONFIG_KPROBES=y' out/.config || { echo "::error::CONFIG_KPROBES not enabled"; exit 1; }
+
+      - name: Assert kernel release string
+        run: |
+          cd kernel
+          REL=$(make --no-print-directory ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out kernelrelease LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k" 2>/dev/null)
+          echo "KERNEL_RELEASE=$REL"
+          echo "$REL" | grep -qE '^6\.6\.89.*android15-8-g14220ae4ce65-ab13680582-4k.*$' || { echo "::error::Release mismatch: $REL"; exit 1; }
+          echo RELEASE_OK
+
+      - name: Build kernel
+        run: |
+          cd kernel
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out -j$(nproc) LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k"
+
+      - name: Verify artifacts
+        run: |
+          ls -la kernel/out/arch/arm64/boot/
+          cat kernel/out/include/config/kernel.release
+          strings kernel/out/arch/arm64/boot/Image | grep -m1 "Linux version"
+          echo "--- ksu symbols ---"
+          grep -c -E ' ksu_' kernel/out/System.map || true
+          echo "--- ksu strings ---"
+          strings kernel/out/arch/arm64/boot/Image | grep -m5 -iE 'SukiSU|KernelSU|ksu_' || true
+          echo "--- skroot strings ---"
+          grep -q "skroot_try_umh" kernel/out/System.map || { echo "::error::skroot hook not compiled"; exit 1; }
+          test -n "$(grep -E ' ksu_' kernel/out/System.map | head -1)" || { echo "::error::no ksu symbols in kernel"; exit 1; }
+
+      - name: Download VioletAVB base boot
+        run: |
+          curl -fsSL -o VioletAVB_boot.img "https://aka.doubaocdn.com/s/JLSTVbGrXV"
+          ls -l VioletAVB_boot.img
+          test $(stat -c%s VioletAVB_boot.img) -eq 100663296 || { echo "::error::base size unexpected"; exit 1; }
+
+      - name: Repack with magiskboot
+        run: |
+          curl -fsSL -o avb.tar.gz "https://github.com/showdo/AOSP-Testkey-BootSigner/archive/refs/heads/main.tar.gz"
+          tar -xzf avb.tar.gz
+          chmod +x AOSP-Testkey-BootSigner-main/tools/magiskboot
+          mkdir -p work && cp VioletAVB_boot.img work/boot.img
+          cd work
+          ../AOSP-Testkey-BootSigner-main/tools/magiskboot unpack boot.img
+          rm -f kernel && cp ../kernel/out/arch/arm64/boot/Image kernel
+          ../AOSP-Testkey-BootSigner-main/tools/magiskboot repack boot.img
+          ls -la new-boot.img
+          cp new-boot.img ../AOSP-Testkey-BootSigner-main/boot.img
+
+      - name: AVB sign
+        run: |
+          cd AOSP-Testkey-BootSigner-main
+          python3 rebuild_avb.py --chained-mode
+          ls -la boot.img
+          python3 tools/avbtool.py info_image --image boot.img | grep -E "Algorithm|Partition Name" | head -4
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: sukisu-nova-6.6.89-boot-${{ github.run_id }}
+          name: sukisu-nova-6.6.89-boot-${{ github.run_id }}
+          body: |
+            6.6.89 GKI (aosp-mirror/kernel_common @14220ae4) kernel:
+            - CVE-2024-43093 zero-width fix (fix1.patch)
+            - SukiSU Nova kernel driver (SukiSU-Nova/SukiSU-Nova v3.0.0), CONFIG_KSU=y / KPROBES
+            - SKRoot source-level trigger + single 48-byte token gate (fs/skroot_umh.c)
+            Trigger: execve("/system/bin/skroot/<TOKEN>") -> call_usermodehelper("/system/bin/sh -c /data/local/tmp/skroot/init")
+            Token in this image: ioSDaJPPRE1AGvZLNfwrvnYh2Icef78avwFG6fb1Y1F5Oq6c
+            Manager: com.sukisu.nova (SukiSU Nova v3.0.0)
+            Kernel: 6.6.89-android15-8-g14220ae4ce65-ab13680582-4k
+            Base: VioletAVB_boot.img, magiskboot kernel swap, AOSP testkey chained AVB
+          files: |
+            AOSP-Testkey-BootSigner-main/boot.img
+            kernel/out/arch/arm64/boot/Image
+          fail_on_unmatched: false
