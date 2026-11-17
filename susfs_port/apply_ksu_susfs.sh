@@ -7,11 +7,13 @@ p10="$ws/10_ksu_filtered.patch"
 adapt="$ws/patches/susfs_port/nova_susfs_adapt.patch"
 sel="$ws/patches/susfs_port/nova_susfs_selinux.patch"
 hide="$ws/patches/susfs_port/nova_susfs_hide_shim.patch"
+nohook="$ws/patches/susfs_port/nova_susfs_no_runtime_hook.patch"
 
 echo "p10 bytes: $(stat -c%s "$p10" 2>/dev/null || echo missing)"
 echo "adapt bytes: $(stat -c%s "$adapt" 2>/dev/null || echo missing)"
 echo "selinux bytes: $(stat -c%s "$sel" 2>/dev/null || echo missing)"
 echo "hide bytes: $(stat -c%s "$hide" 2>/dev/null || echo missing)"
+echo "nohook bytes: $(stat -c%s "$nohook" 2>/dev/null || echo missing)"
 
 cd "$ksu" || { echo "::error::cannot cd $ksu"; exit 1; }
 
@@ -23,15 +25,18 @@ patch -p1 --forward < "$sel" > /tmp/sel.log 2>&1
 rcsel=$?
 patch -p1 --forward < "$hide" > /tmp/hide.log 2>&1
 rchide=$?
+patch -p1 --forward < "$nohook" > /tmp/nohook.log 2>&1
+rcnohook=$?
 rejs=$(find . -name "*.rej" | head -5 | tr '\n' '|')
-echo "rc10=$rc10 rcadapt=$rcadapt rcsel=$rcsel rchide=$rchide rejs=$rejs"
+echo "rc10=$rc10 rcadapt=$rcadapt rcsel=$rcsel rchide=$rchide rcnohook=$rcnohook rejs=$rejs"
 echo "--- p10.log tail ---"; tail -5 /tmp/p10.log
 echo "--- adapt.log tail ---"; tail -5 /tmp/adapt.log
 echo "--- selinux.log tail ---"; tail -5 /tmp/sel.log
 echo "--- hide.log tail ---"; tail -5 /tmp/hide.log
+echo "--- nohook.log tail ---"; tail -5 /tmp/nohook.log
 
-if [ "$rc10" -ne 0 ] || [ "$rcadapt" -ne 0 ] || [ "$rcsel" -ne 0 ] || [ "$rchide" -ne 0 ] || [ -n "$rejs" ]; then
-  echo "::error::rc10=$rc10 rcadapt=$rcadapt rcsel=$rcsel rchide=$rchide rejs=$rejs seltail=$(tail -2 /tmp/sel.log | tr '\n' '|') hidetail=$(tail -2 /tmp/hide.log | tr '\n' '|') adapttail=$(tail -2 /tmp/adapt.log | tr '\n' '|')"
+if [ "$rc10" -ne 0 ] || [ "$rcadapt" -ne 0 ] || [ "$rcsel" -ne 0 ] || [ "$rchide" -ne 0 ] || [ "$rcnohook" -ne 0 ] || [ -n "$rejs" ]; then
+  echo "::error::rc10=$rc10 rcadapt=$rcadapt rcsel=$rcsel rchide=$rchide rcnohook=$rcnohook rejs=$rejs seltail=$(tail -2 /tmp/sel.log | tr '\n' '|') hidetail=$(tail -2 /tmp/hide.log | tr '\n' '|') adapttail=$(tail -2 /tmp/adapt.log | tr '\n' '|') nohooktail=$(tail -2 /tmp/nohook.log | tr '\n' '|')"
   exit 1
 fi
 
@@ -94,4 +99,6 @@ grep -q "handle_selinux_setprocattr" "$ksec/hooks.c" || { echo "::error::hooks.c
 grep -q "fake_status" "$ksec/selinuxfs.c" || { echo "::error::selinuxfs.c has no fake_status usage"; exit 1; }
 grep -q "linux/jump_label.h" "$ksec/selinuxfs.c" || { echo "::error::selinuxfs.c missing jump_label include"; exit 1; }
 grep -q "susfs_is_current_ksu_domain" "$ksec/status.c" || { echo "::error::status.c has no susfs domain check"; exit 1; }
+grep -q "runtime patch_text skipped" kernel/feature/selinux_hide.c || { echo "::error::selinux_hide.c runtime patch not disabled"; exit 1; }
+grep -q "runtime kprobe disabled in this build" kernel/feature/avc_spoof.c || { echo "::error::avc_spoof.c runtime kprobe not disabled"; exit 1; }
 echo APPLY_OK
