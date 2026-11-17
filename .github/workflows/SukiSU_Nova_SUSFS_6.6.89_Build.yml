@@ -53,12 +53,7 @@ jobs:
 
       - name: Apply susfs KSU-side patch and Nova adaptation
         run: |
-          cd kernel/KernelSU
-          patch -p1 --forward -F3 < ../../10_ksu_filtered.patch
-          ! find . -name "*.rej" | grep -q . && echo KSU_PATCH_OK
-          patch -p1 --forward < ../../patches/susfs_port/nova_susfs_adapt.patch
-          ! find . -name "*.rej" | grep -q . && echo ADAPT_OK
-          grep -q "susfs_reboot.o" Kbuild
+          bash patches/susfs_port/apply_ksu_susfs.sh
 
       - name: Install build deps
         run: |
