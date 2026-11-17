@@ -1,0 +1,140 @@
+name: SukiSU_Nova_Clean_6.6.89_Build
+
+on:
+  push:
+    branches: [nova-clean-689]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build_6.6.89_zerowidth_sukisu_nova_pure
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: aosp-mirror/kernel_common
+          ref: 14220ae4ce65ba58711f65587ef4e93f408892fb
+          path: kernel
+
+      - name: Fetch zero-width fix patch
+        run: |
+          curl -fsSL -o fix1.patch "https://raw.githubusercontent.com/xiaoxiaoyu78/gki-unicode-fix/main/fix1.patch"
+          ls -l fix1.patch
+          wc -l fix1.patch
+
+      - name: Apply zero-width fix
+        run: |
+          cd kernel
+          echo "=== fix1 dry-run ==="
+          patch -p1 --dry-run < ../fix1.patch
+          patch -p1 < ../fix1.patch
+          if grep -q "ignore_init" fs/unicode/mkutf8data.c; then echo "::error::ignore_init still present"; exit 1; fi
+          grep -n "utf8data" fs/unicode/mkutf8data.c | head -3 || true
+          echo FIX_OK
+
+      - name: Integrate SukiSU Nova kernel driver
+        run: |
+          cd kernel
+          git clone https://github.com/SukiSU-Nova/SukiSU-Nova KernelSU
+          sh KernelSU/kernel/setup.sh v3.0.0
+          echo "--- KSU HEAD ---"
+          git -C KernelSU log -1 --oneline
+          git -C KernelSU describe --tags --always
+          ls -l drivers/kernelsu
+          test -e drivers/kernelsu/Kbuild || { echo "::error::kernelsu symlink broken"; exit 1; }
+          grep -n kernelsu drivers/Makefile
+          grep -n kernelsu drivers/Kconfig
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q flex bison bc cpio lz4 zstd xz-utils python3 file gawk dwarves libssl-dev libelf-dev libncurses-dev clang lld llvm
+
+      - name: Configure defconfig
+        run: |
+          cd kernel
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out gki_defconfig
+          scripts/config --file out/.config --enable KSU
+          scripts/config --file out/.config --enable KPROBES
+          scripts/config --file out/.config --enable EXT4_FS
+          scripts/config --file out/.config --enable KALLSYMS
+          scripts/config --file out/.config --enable KALLSYMS_ALL
+          scripts/config --file out/.config --disable KSU_DEBUG
+          scripts/config --file out/.config --disable LOCALVERSION_AUTO
+          scripts/config --file out/.config --set-str LOCALVERSION ""
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out olddefconfig
+          echo "--- KSU config ---"
+          grep -E '^CONFIG_KSU=|^CONFIG_KSU_DEBUG=|^CONFIG_KPM=|^CONFIG_KPROBES=|^CONFIG_EXT4_FS=|^CONFIG_KALLSYMS' out/.config
+          grep -q '^CONFIG_KSU=y' out/.config || { echo "::error::CONFIG_KSU not enabled"; exit 1; }
+          grep -q '^CONFIG_KPROBES=y' out/.config || { echo "::error::CONFIG_KPROBES not enabled"; exit 1; }
+
+      - name: Assert kernel release string
+        run: |
+          cd kernel
+          REL=$(make --no-print-directory ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out kernelrelease LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k" 2>/dev/null)
+          echo "KERNEL_RELEASE=$REL"
+          echo "$REL" | grep -qE '^6\.6\.89.*android15-8-g14220ae4ce65-ab13680582-4k.*$' || { echo "::error::Release mismatch: $REL"; exit 1; }
+          echo RELEASE_OK
+
+      - name: Build kernel
+        run: |
+          cd kernel
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out -j$(nproc) LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k"
+
+      - name: Verify artifacts
+        run: |
+          ls -la kernel/out/arch/arm64/boot/
+          cat kernel/out/include/config/kernel.release
+          strings kernel/out/arch/arm64/boot/Image | grep -m1 "Linux version"
+          test -n "$(grep -E ' ksu_' kernel/out/System.map | head -1)" || { echo "::error::no ksu symbols in kernel"; exit 1; }
+          echo "--- ksu symbols: $(grep -cE ' ksu_' kernel/out/System.map) ---"
+          if grep -q "skroot_try_umh" kernel/out/System.map; then echo "::error::skroot hook unexpectedly present"; exit 1; fi
+          if strings kernel/out/arch/arm64/boot/Image | grep -q "/data/local/tmp/skroot/init"; then echo "::error::skroot script path unexpectedly present"; exit 1; fi
+          echo CLEAN_OK
+
+      - name: Download VioletAVB base boot
+        run: |
+          curl -fsSL -o VioletAVB_boot.img "https://aka.doubaocdn.com/s/JLSTVbGrXV"
+          ls -l VioletAVB_boot.img
+          test $(stat -c%s VioletAVB_boot.img) -eq 100663296 || { echo "::error::base size unexpected"; exit 1; }
+
+      - name: Repack with magiskboot
+        run: |
+          curl -fsSL -o avb.tar.gz "https://github.com/showdo/AOSP-Testkey-BootSigner/archive/refs/heads/main.tar.gz"
+          tar -xzf avb.tar.gz
+          chmod +x AOSP-Testkey-BootSigner-main/tools/magiskboot
+          mkdir -p work && cp VioletAVB_boot.img work/boot.img
+          cd work
+          ../AOSP-Testkey-BootSigner-main/tools/magiskboot unpack boot.img
+          rm -f kernel && cp ../kernel/out/arch/arm64/boot/Image kernel
+          ../AOSP-Testkey-BootSigner-main/tools/magiskboot repack boot.img
+          ls -la new-boot.img
+          cp new-boot.img ../AOSP-Testkey-BootSigner-main/boot.img
+
+      - name: AVB sign
+        run: |
+          cd AOSP-Testkey-BootSigner-main
+          python3 rebuild_avb.py --chained-mode
+          ls -la boot.img
+          python3 tools/avbtool.py info_image --image boot.img | grep -E "Algorithm|Partition Name" | head -4
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: sukisu-nova-clean-6.6.89-boot-${{ github.run_id }}
+          name: sukisu-nova-clean-6.6.89-boot-${{ github.run_id }}
+          body: |
+            6.6.89 GKI (aosp-mirror/kernel_common @14220ae4):
+            - CVE-2024-43093 zero-width fix (fix1.patch)
+            - SukiSU Nova kernel driver (SukiSU-Nova/SukiSU-Nova v3.0.0), CONFIG_KSU=y / KPROBES
+            - NO SKRoot hook, NO token gate (pure build)
+            Manager: com.sukisu.nova (SukiSU Nova v3.0.0)
+            Kernel: 6.6.89-android15-8-g14220ae4ce65-ab13680582-4k
+            Base: VioletAVB_boot.img, magiskboot kernel swap, AOSP testkey chained AVB
+          files: |
+            AOSP-Testkey-BootSigner-main/boot.img
+            kernel/out/arch/arm64/boot/Image
+          fail_on_unmatched: false
