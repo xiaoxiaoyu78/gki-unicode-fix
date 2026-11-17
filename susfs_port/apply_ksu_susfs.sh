@@ -8,7 +8,6 @@ adapt="$ws/patches/susfs_port/nova_susfs_adapt.patch"
 
 echo "p10 bytes: $(stat -c%s "$p10" 2>/dev/null || echo missing)"
 echo "adapt bytes: $(stat -c%s "$adapt" 2>/dev/null || echo missing)"
-head -c 200 "$p10" | head -3
 
 cd "$ksu" || { echo "::error::cannot cd $ksu"; exit 1; }
 
@@ -26,5 +25,26 @@ if [ "$rc10" -ne 0 ] || [ "$rcadapt" -ne 0 ] || [ -n "$rejs" ]; then
   exit 1
 fi
 
+python3 - <<'PYEOF'
+import sys
+p='kernel/hook/setuid_hook.c'
+s=open(p).read()
+if '#include <linux/susfs_def.h>' not in s:
+    a='#include <linux/uidgid.h>\n'
+    if a not in s:
+        sys.exit('uidgid include anchor missing in setuid_hook.c')
+    s=s.replace(a, a+'#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif\n',1)
+    open(p,'w').write(s)
+    print('setuid_hook.c include patched')
+
+p='kernel/supercall/susfs_reboot.c'
+s=open(p).read()
+if '#include <linux/cred.h>' not in s:
+    s=s.replace('#include <linux/types.h>\n','#include <linux/types.h>\n#include <linux/cred.h>\n#include <linux/printk.h>\n',1)
+    open(p,'w').write(s)
+    print('susfs_reboot.c includes patched')
+PYEOF
+
 grep -q "susfs_reboot.o" kernel/Kbuild || { echo "::error::kernel/Kbuild has no susfs_reboot.o"; exit 1; }
+grep -q "linux/susfs_def.h" kernel/hook/setuid_hook.c || { echo "::error::setuid_hook.c has no susfs_def include"; exit 1; }
 echo APPLY_OK
