@@ -12,6 +12,7 @@ KSU_EXCLUDES = {
     'kernel/hook/setuid_hook.c', 'kernel/policy/allowlist.c',
     'kernel/runtime/ksud_integration.c',
     'kernel/supercall/supercall.c', 'kernel/supercall/dispatch.c',
+    'kernel/policy/app_profile.c', 'kernel/policy/app_profile.h',
 }
 
 def filter_patch(src_path, out_path, excludes):
