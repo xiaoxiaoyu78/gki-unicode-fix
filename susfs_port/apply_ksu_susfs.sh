@@ -5,10 +5,12 @@ ws="$(pwd)"
 ksu="$ws/kernel/KernelSU"
 p10="$ws/10_ksu_filtered.patch"
 adapt="$ws/patches/susfs_port/nova_susfs_adapt.patch"
+sel="$ws/patches/susfs_port/nova_susfs_selinux.patch"
 hide="$ws/patches/susfs_port/nova_susfs_hide_shim.patch"
 
 echo "p10 bytes: $(stat -c%s "$p10" 2>/dev/null || echo missing)"
 echo "adapt bytes: $(stat -c%s "$adapt" 2>/dev/null || echo missing)"
+echo "selinux bytes: $(stat -c%s "$sel" 2>/dev/null || echo missing)"
 echo "hide bytes: $(stat -c%s "$hide" 2>/dev/null || echo missing)"
 
 cd "$ksu" || { echo "::error::cannot cd $ksu"; exit 1; }
@@ -17,16 +19,19 @@ patch -p1 --forward -F3 < "$p10" > /tmp/p10.log 2>&1
 rc10=$?
 patch -p1 --forward < "$adapt" > /tmp/adapt.log 2>&1
 rcadapt=$?
+patch -p1 --forward < "$sel" > /tmp/sel.log 2>&1
+rcsel=$?
 patch -p1 --forward < "$hide" > /tmp/hide.log 2>&1
 rchide=$?
 rejs=$(find . -name "*.rej" | head -5 | tr '\n' '|')
-echo "rc10=$rc10 rcadapt=$rcadapt rchide=$rchide rejs=$rejs"
+echo "rc10=$rc10 rcadapt=$rcadapt rcsel=$rcsel rchide=$rchide rejs=$rejs"
 echo "--- p10.log tail ---"; tail -5 /tmp/p10.log
 echo "--- adapt.log tail ---"; tail -5 /tmp/adapt.log
+echo "--- selinux.log tail ---"; tail -5 /tmp/sel.log
 echo "--- hide.log tail ---"; tail -5 /tmp/hide.log
 
-if [ "$rc10" -ne 0 ] || [ "$rcadapt" -ne 0 ] || [ "$rchide" -ne 0 ] || [ -n "$rejs" ]; then
-  echo "::error::rc10=$rc10 rcadapt=$rcadapt rchide=$rchide rejs=$rejs p10tail=$(tail -2 /tmp/p10.log | tr '\n' '|') adapttail=$(tail -2 /tmp/adapt.log | tr '\n' '|') hidetail=$(tail -2 /tmp/hide.log | tr '\n' '|')"
+if [ "$rc10" -ne 0 ] || [ "$rcadapt" -ne 0 ] || [ "$rcsel" -ne 0 ] || [ "$rchide" -ne 0 ] || [ -n "$rejs" ]; then
+  echo "::error::rc10=$rc10 rcadapt=$rcadapt rcsel=$rcsel rchide=$rchide rejs=$rejs seltail=$(tail -2 /tmp/sel.log | tr '\n' '|') hidetail=$(tail -2 /tmp/hide.log | tr '\n' '|') adapttail=$(tail -2 /tmp/adapt.log | tr '\n' '|')"
   exit 1
 fi
 
