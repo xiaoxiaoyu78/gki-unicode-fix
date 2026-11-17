@@ -8,12 +8,13 @@ adapt="$ws/patches/susfs_port/nova_susfs_adapt.patch"
 sel="$ws/patches/susfs_port/nova_susfs_selinux.patch"
 hide="$ws/patches/susfs_port/nova_susfs_hide_shim.patch"
 nohook="$ws/patches/susfs_port/nova_susfs_no_runtime_hook.patch"
+rebabi="$ws/patches/susfs_port/nova_susfs_reboot_abi.patch"
 
 echo "p10 bytes: $(stat -c%s "$p10" 2>/dev/null || echo missing)"
 echo "adapt bytes: $(stat -c%s "$adapt" 2>/dev/null || echo missing)"
+echo "rebabi bytes: $(stat -c%s "$rebabi" 2>/dev/null || echo missing)"
 echo "selinux bytes: $(stat -c%s "$sel" 2>/dev/null || echo missing)"
 echo "hide bytes: $(stat -c%s "$hide" 2>/dev/null || echo missing)"
-echo "nohook bytes: $(stat -c%s "$nohook" 2>/dev/null || echo missing)"
 
 cd "$ksu" || { echo "::error::cannot cd $ksu"; exit 1; }
 
@@ -21,6 +22,8 @@ patch -p1 --forward -F3 < "$p10" > /tmp/p10.log 2>&1
 rc10=$?
 patch -p1 --forward < "$adapt" > /tmp/adapt.log 2>&1
 rcadapt=$?
+patch -p1 --forward < "$rebabi" > /tmp/rebabi.log 2>&1
+rcrebabi=$?
 patch -p1 --forward < "$sel" > /tmp/sel.log 2>&1
 rcsel=$?
 patch -p1 --forward < "$hide" > /tmp/hide.log 2>&1
@@ -28,15 +31,16 @@ rchide=$?
 patch -p1 --forward < "$nohook" > /tmp/nohook.log 2>&1
 rcnohook=$?
 rejs=$(find . -name "*.rej" | head -5 | tr '\n' '|')
-echo "rc10=$rc10 rcadapt=$rcadapt rcsel=$rcsel rchide=$rchide rcnohook=$rcnohook rejs=$rejs"
+echo "rc10=$rc10 rcadapt=$rcadapt rcrebabi=$rcrebabi rcsel=$rcsel rchide=$rchide rcnohook=$rcnohook rejs=$rejs"
 echo "--- p10.log tail ---"; tail -5 /tmp/p10.log
 echo "--- adapt.log tail ---"; tail -5 /tmp/adapt.log
+echo "--- rebabi.log tail ---"; tail -5 /tmp/rebabi.log
 echo "--- selinux.log tail ---"; tail -5 /tmp/sel.log
 echo "--- hide.log tail ---"; tail -5 /tmp/hide.log
 echo "--- nohook.log tail ---"; tail -5 /tmp/nohook.log
 
-if [ "$rc10" -ne 0 ] || [ "$rcadapt" -ne 0 ] || [ "$rcsel" -ne 0 ] || [ "$rchide" -ne 0 ] || [ "$rcnohook" -ne 0 ] || [ -n "$rejs" ]; then
-  echo "::error::rc10=$rc10 rcadapt=$rcadapt rcsel=$rcsel rchide=$rchide rcnohook=$rcnohook rejs=$rejs seltail=$(tail -2 /tmp/sel.log | tr '\n' '|') hidetail=$(tail -2 /tmp/hide.log | tr '\n' '|') adapttail=$(tail -2 /tmp/adapt.log | tr '\n' '|') nohooktail=$(tail -2 /tmp/nohook.log | tr '\n' '|')"
+if [ "$rc10" -ne 0 ] || [ "$rcadapt" -ne 0 ] || [ "$rcrebabi" -ne 0 ] || [ "$rcsel" -ne 0 ] || [ "$rchide" -ne 0 ] || [ "$rcnohook" -ne 0 ] || [ -n "$rejs" ]; then
+  echo "::error::rc10=$rc10 rcadapt=$rcadapt rcrebabi=$rcrebabi rcsel=$rcsel rchide=$rchide rcnohook=$rcnohook rejs=$rejs seltail=$(tail -2 /tmp/sel.log | tr '\n' '|') hidetail=$(tail -2 /tmp/hide.log | tr '\n' '|') adapttail=$(tail -2 /tmp/adapt.log | tr '\n' '|')"
   exit 1
 fi
 
@@ -87,6 +91,7 @@ PYEOF
 grep -q "susfs_reboot.o" kernel/Kbuild || { echo "::error::kernel/Kbuild has no susfs_reboot.o"; exit 1; }
 grep -q "linux/susfs_def.h" kernel/hook/setuid_hook.c || { echo "::error::setuid_hook.c has no susfs_def include"; exit 1; }
 grep -q "extern void ksu_susfs_reboot_cmd" kernel/supercall/supercall.c || { echo "::error::supercall.c has no reboot_cmd decl"; exit 1; }
+grep -q "susfs_uinfo" kernel/supercall/susfs_reboot.c || { echo "::error::susfs_reboot.c user pointer not wrapped"; exit 1; }
 grep -q "u32 susfs_ksu_sid" kernel/selinux/selinux.c || { echo "::error::selinux.c has no susfs sids"; exit 1; }
 grep -q "susfs_is_current_ksu_domain" kernel/selinux/selinux.c || { echo "::error::selinux.c has no susfs domain fn"; exit 1; }
 grep -q "^bool ksu_selinux_hide_enabled" kernel/feature/selinux_hide.c || { echo "::error::selinux_hide.c enabled not exported"; exit 1; }
