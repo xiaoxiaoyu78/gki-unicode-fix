@@ -44,6 +44,13 @@ if '#include <linux/cred.h>' not in s:
     open(p,'w').write(s)
     print('susfs_reboot.c includes patched')
 
+p='kernel/core/init.c'
+s=open(p).read()
+if 'susfs_set_batch_sid' not in s:
+    s=s.replace('#ifdef CONFIG_KSU_SUSFS\n    susfs_init();','extern void susfs_set_batch_sid(void);\n\n#ifdef CONFIG_KSU_SUSFS\n    susfs_init();\n    susfs_set_batch_sid();',1)
+    open(p,'w').write(s)
+    print('init.c batch sid call added')
+
 p='kernel/feature/sucompat.c'
 s=open(p).read()
 if 'ret = escape_to_root_for_init();' in s:
@@ -54,4 +61,5 @@ PYEOF
 
 grep -q "susfs_reboot.o" kernel/Kbuild || { echo "::error::kernel/Kbuild has no susfs_reboot.o"; exit 1; }
 grep -q "linux/susfs_def.h" kernel/hook/setuid_hook.c || { echo "::error::setuid_hook.c has no susfs_def include"; exit 1; }
+grep -q "susfs_set_batch_sid" kernel/core/init.c || { echo "::error::init.c has no batch sid call"; exit 1; }
 echo APPLY_OK

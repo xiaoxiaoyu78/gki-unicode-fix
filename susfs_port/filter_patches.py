@@ -7,15 +7,16 @@ KERNEL_EXCLUDES = {
     'security/selinux/status.c', 'drivers/input/input.c',
 }
 
-KSU_EXCLUDES = {
-    'kernel/Kbuild', 'kernel/Makefile', 'kernel/core/init.c',
-    'kernel/hook/setuid_hook.c', 'kernel/policy/allowlist.c',
-    'kernel/runtime/ksud_integration.c',
-    'kernel/supercall/supercall.c', 'kernel/supercall/dispatch.c',
-    'kernel/policy/app_profile.c', 'kernel/policy/app_profile.h',
+# Nova's KSU tree diverges from upstream: only take the SUSFS config menu
+# and the sid helpers appended to selinux.c/h. Everything else is handled
+# by nova_susfs_adapt.patch / apply_ksu_susfs.sh.
+KSU_KEEP = {
+    'kernel/Kconfig',
+    'kernel/selinux/selinux.c',
+    'kernel/selinux/selinux.h',
 }
 
-def filter_patch(src_path, out_path, excludes):
+def filter_patch(src_path, out_path, excludes=None, keep=None):
     src = open(src_path).read()
     kept = []
     for part in re.split(r'(?m)^diff --git ', src)[1:]:
@@ -23,13 +24,16 @@ def filter_patch(src_path, out_path, excludes):
         m = re.match(r'diff --git a/(.*?) b/(.*?)\n', head)
         if not m:
             continue
-        if m.group(2) in excludes:
+        name = m.group(2)
+        if excludes and name in excludes:
+            continue
+        if keep is not None and name not in keep:
             continue
         kept.append(head)
     open(out_path, 'w').write(''.join(kept))
     print('%s -> %s (%d files kept)' % (src_path, out_path, len(kept)))
 
 filter_patch('susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch',
-             '50_kernel_filtered.patch', KERNEL_EXCLUDES)
+             '50_kernel_filtered.patch', excludes=KERNEL_EXCLUDES)
 filter_patch('susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch',
-             '10_ksu_filtered.patch', KSU_EXCLUDES)
+             '10_ksu_filtered.patch', keep=KSU_KEEP)
