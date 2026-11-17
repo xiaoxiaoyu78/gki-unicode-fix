@@ -120,12 +120,12 @@ jobs:
 
       - name: Download VioletAVB base boot
         run: |
-          curl -fsSL -o VioletAVB_boot.img "https://aka.doubaocdn.com/s/JLSTVbGrXV"
+          curl -fsSL --retry 5 --retry-all-errors -o VioletAVB_boot.img "https://aka.doubaocdn.com/s/X5BgJRDVmY"
           test $(stat -c%s VioletAVB_boot.img) -eq 100663296
 
       - name: Repack with magiskboot
         run: |
-          curl -fsSL -o avb.tar.gz "https://github.com/showdo/AOSP-Testkey-BootSigner/archive/refs/heads/main.tar.gz"
+          curl -fsSL --retry 5 --retry-all-errors -o avb.tar.gz "https://github.com/showdo/AOSP-Testkey-BootSigner/archive/refs/heads/main.tar.gz"
           tar -xzf avb.tar.gz
           chmod +x AOSP-Testkey-BootSigner-main/tools/magiskboot
           mkdir -p work && cp VioletAVB_boot.img work/boot.img
@@ -157,8 +157,10 @@ jobs:
             grep -E "susfs_ksu_sid|susfs_priv_app_sid|susfs_init|susfs_show_version" "$ws/kernel/out/System.map" 2>/dev/null | head -10 || echo NO_SYSTEMMAP
             echo "--- boot dir ---"
             ls -l "$ws/kernel/out/arch/arm64/boot/" 2>/dev/null || echo NO_BOOTDIR
+            echo "--- base / work ---"
+            ls -l "$ws/VioletAVB_boot.img" "$ws/work" "$ws/AOSP-Testkey-BootSigner-main" 2>/dev/null | head -20 || echo NO_STAGE
             echo "--- build.log tail ---"
-            tail -60 /tmp/build.log 2>/dev/null || echo NO_BUILDLOG
+            tail -40 /tmp/build.log 2>/dev/null || echo NO_BUILDLOG
           } > /tmp/diag.txt 2>&1
           echo "::error::diagnostics: $(grep -c . /tmp/diag.txt) lines"
           cd "$ws"
