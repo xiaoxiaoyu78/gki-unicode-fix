@@ -5,7 +5,7 @@ KERNEL_EXCLUDES = {
     'fs/exec.c', 'fs/open.c', 'fs/stat.c', 'fs/read_write.c',
     'kernel/sys.c', 'kernel/reboot.c',
     'security/selinux/status.c', 'drivers/input/input.c',
-    'security/selinux/selinuxfs.c',
+    'security/selinux/selinuxfs.c', 'security/selinux/hooks.c',
 }
 
 KSU_EXCLUDES = {
