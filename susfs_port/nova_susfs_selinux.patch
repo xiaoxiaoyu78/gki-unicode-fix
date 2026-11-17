@@ -1,0 +1,36 @@
+diff --git a/kernel/selinux/selinux.c b/kernel/selinux/selinux.c
+@@ -19,6 +19,11 @@
+  * does not cause a functional failure.
+  */
+ static u32 cached_su_sid __read_mostly = 0;
++
++#ifdef CONFIG_KSU_SUSFS
++u32 susfs_ksu_sid = 0;
++u32 susfs_priv_app_sid = 0;
++#endif
+ static u32 cached_zygote_sid __read_mostly = 0;
+ static u32 cached_init_sid __read_mostly = 0;
+ static u32 cached_adbd_sid __read_mostly = 0;
+@@ -125,6 +130,11 @@
+         cached_su_sid = 0;
+     } else {
+         pr_info("Cached su SID: %u\n", cached_su_sid);
++#ifdef CONFIG_KSU_SUSFS
++        susfs_ksu_sid = cached_su_sid;
++        if (!security_secctx_to_secid("priv_app", 8, &susfs_priv_app_sid))
++            pr_info("susfs: priv_app sid %u\n", susfs_priv_app_sid);
++#endif
+     }
+ 
+     err = security_secctx_to_secid(ZYGOTE_CONTEXT, strlen(ZYGOTE_CONTEXT), &cached_zygote_sid);
+@@ -234,3 +244,10 @@
+     }
+     commit_creds(cred);
+ }
++
++#ifdef CONFIG_KSU_SUSFS
++bool susfs_is_current_ksu_domain(void)
++{
++    return is_ksu_domain();
++}
++#endif
