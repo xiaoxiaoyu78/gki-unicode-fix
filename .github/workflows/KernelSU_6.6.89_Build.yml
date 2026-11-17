@@ -1,0 +1,137 @@
+name: KernelSU_6.6.89_Build
+
+on:
+  push:
+    branches: [ksu-689]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build_${{ matrix.flavor }}_6.6.89
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: next
+            repo: KernelSU-Next/KernelSU-Next
+            ref: v3.4.2
+          - flavor: official
+            repo: tiann/KernelSU
+            ref: v1.0.5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: aosp-mirror/kernel_common
+          ref: 14220ae4ce65ba58711f65587ef4e93f408892fb
+          path: kernel
+
+      - name: Zero-width fix (CVE-2024-43093)
+        run: |
+          curl -fsSL -o fix1.patch "https://raw.githubusercontent.com/xiaoxiaoyu78/gki-unicode-fix/main/fix1.patch"
+          cd kernel && patch -p1 < ../fix1.patch
+          ! grep -q "ignore_init" fs/unicode/mkutf8data.c && echo ZERO_WIDTH_OK
+
+      - name: Integrate ${{ matrix.flavor }} kernel driver
+        run: |
+          cd kernel
+          git clone --depth 1 -b ${{ matrix.ref }} https://github.com/${{ matrix.repo }} KernelSU
+          sh KernelSU/kernel/setup.sh ${{ matrix.ref }}
+          git -C KernelSU log -1 --oneline
+          test -e drivers/kernelsu/Kbuild && echo DRIVER_OK
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q flex bison bc cpio lz4 zstd xz-utils python3 file gawk dwarves libssl-dev libelf-dev libncurses-dev clang lld llvm
+
+      - name: Configure defconfig (plain KSU)
+        run: |
+          cd kernel
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out gki_defconfig
+          scripts/config --file out/.config --enable KSU
+          scripts/config --file out/.config --enable KPROBES
+          scripts/config --file out/.config --enable EXT4_FS
+          scripts/config --file out/.config --enable KALLSYMS
+          scripts/config --file out/.config --disable KSU_DEBUG
+          scripts/config --file out/.config --disable LOCALVERSION_AUTO
+          scripts/config --file out/.config --set-str LOCALVERSION ""
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out olddefconfig
+          grep -E "^CONFIG_(KSU|KPROBES|EXT4_FS|KALLSYMS|KSU_DEBUG)" out/.config | sort
+          grep -q "^CONFIG_KSU=y" out/.config
+
+      - name: Build kernel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd kernel
+          set +e
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out -j$(nproc) LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k" 2>&1 | tee /tmp/build.log
+          rc=${PIPESTATUS[0]}
+          if [ $rc -ne 0 ]; then
+            {
+              echo "::error::build failed rc=$rc flavor=${{ matrix.flavor }}"
+              echo "--- error lines ---"
+              grep -nE "error:" /tmp/build.log | head -30
+            }
+            cd "$GITHUB_WORKSPACE"
+            rm -rf logrepo && mkdir logrepo && cd logrepo
+            git init -q .
+            git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            gzip -c /tmp/build.log > build.log.gz
+            git checkout -q -b ci-logs-${{ matrix.flavor }}
+            git add build.log.gz
+            git -c user.email=ci@local -c user.name=ci commit -q -m "build log ${{ matrix.flavor }} run ${GITHUB_RUN_ID}"
+            git push -q -f origin ci-logs-${{ matrix.flavor }}
+            exit 1
+          fi
+
+      - name: Verify artifacts
+        run: |
+          cd kernel
+          cat out/include/config/kernel.release
+          strings out/arch/arm64/boot/Image | grep -m1 "Linux version"
+          test -n "$(grep -E " ksu_" out/System.map | head -1)"
+          strings out/arch/arm64/boot/Image | grep -m3 -E "KernelSU|kernelsu" || true
+          echo KSU_OK
+
+      - name: Download VioletAVB base boot
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors -o VioletAVB_boot.img "https://aka.doubaocdn.com/s/X5BgJRDVmY"
+          test $(stat -c%s VioletAVB_boot.img) -eq 100663296
+
+      - name: Repack with magiskboot
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors -o avb.tar.gz "https://github.com/showdo/AOSP-Testkey-BootSigner/archive/refs/heads/main.tar.gz"
+          tar -xzf avb.tar.gz
+          chmod +x AOSP-Testkey-BootSigner-main/tools/magiskboot
+          mkdir -p work && cp VioletAVB_boot.img work/boot.img
+          cd work
+          ../AOSP-Testkey-BootSigner-main/tools/magiskboot unpack boot.img
+          rm -f kernel && cp ../kernel/out/arch/arm64/boot/Image kernel
+          ../AOSP-Testkey-BootSigner-main/tools/magiskboot repack boot.img
+          cp new-boot.img ../AOSP-Testkey-BootSigner-main/boot.img
+
+      - name: AVB sign
+        run: |
+          cd AOSP-Testkey-BootSigner-main
+          python3 rebuild_avb.py --chained-mode
+          python3 tools/avbtool.py info_image --image boot.img | grep -E "Algorithm|Public key|Rollback Index" | head -4
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ksu-${{ matrix.flavor }}-6.6.89-boot-${{ github.run_id }}
+          name: ksu-${{ matrix.flavor }}-6.6.89-boot-${{ github.run_id }}
+          body: |
+            6.6.89 GKI (aosp-mirror/kernel_common @14220ae4):
+            - CVE-2024-43093 zero-width fix
+            - ${{ matrix.repo }} ${{ matrix.ref }} kernel driver (CONFIG_KSU=y)
+            - no SUSFS, no KPM
+          files: |
+            AOSP-Testkey-BootSigner-main/boot.img
+            kernel/out/arch/arm64/boot/Image
+          fail_on_unmatched: false
