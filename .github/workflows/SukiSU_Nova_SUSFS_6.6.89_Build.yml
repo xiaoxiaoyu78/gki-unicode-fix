@@ -49,7 +49,7 @@ jobs:
           cd kernel
           patch -p1 --forward -F3 < ../50_kernel_filtered.patch
           ! find . -name "*.rej" | grep -q . && echo KERNEL_PATCH_OK
-          python3 -c "p='fs/proc/base.c';s=open(p).read();a='#include <linux/cpufreq_times.h>\\n';assert a in s;s=s.replace(a,a+'#if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\\n#include <linux/susfs_def.h>\\n#endif\\n',1);open(p,'w').write(s);print('base.c include ok')"
+          python3 -c "p='fs/proc/base.c';s=open(p).read();a='#include <linux/cpufreq_times.h>\n';assert a in s;s=s.replace(a,a+'#if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs_def.h>\n#endif\n',1);open(p,'w').write(s);print('base.c include ok')"
 
       - name: Apply susfs KSU-side patch and Nova adaptation
         run: |
@@ -140,6 +140,36 @@ jobs:
           cd AOSP-Testkey-BootSigner-main
           python3 rebuild_avb.py --chained-mode
           python3 tools/avbtool.py info_image --image boot.img | grep -E "Algorithm|Public key|Rollback Index" | head -4
+
+      - name: Upload failure diagnostics
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ws="$GITHUB_WORKSPACE"
+          {
+            echo "=== diag run $GITHUB_RUN_ID ==="
+            echo "--- selinux.c defs ---"
+            grep -n "susfs_ksu_sid\|susfs_priv_app_sid\|susfs_is_current_ksu_domain" "$ws/kernel/KernelSU/kernel/selinux/selinux.c" || echo MISSING
+            echo "--- config ---"
+            grep -E "^CONFIG_KSU|^CONFIG_KSU_SUSFS" "$ws/kernel/out/.config" 2>/dev/null || echo NO_CONFIG
+            echo "--- System.map susfs ---"
+            grep -E "susfs_ksu_sid|susfs_priv_app_sid|susfs_init|susfs_show_version" "$ws/kernel/out/System.map" 2>/dev/null | head -10 || echo NO_SYSTEMMAP
+            echo "--- boot dir ---"
+            ls -l "$ws/kernel/out/arch/arm64/boot/" 2>/dev/null || echo NO_BOOTDIR
+            echo "--- build.log tail ---"
+            tail -60 /tmp/build.log 2>/dev/null || echo NO_BUILDLOG
+          } > /tmp/diag.txt 2>&1
+          echo "::error::diagnostics: $(grep -c . /tmp/diag.txt) lines"
+          cd "$ws"
+          rm -rf diagrepo && mkdir diagrepo && cd diagrepo
+          git init -q .
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          gzip -c /tmp/diag.txt > diag.txt.gz
+          git checkout -q -b ci-diag
+          git add diag.txt.gz
+          git -c user.email=ci@local -c user.name=ci commit -q -m "diag run ${GITHUB_RUN_ID}"
+          git push -q -f origin ci-diag
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
