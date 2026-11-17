@@ -80,9 +80,30 @@ jobs:
           ! grep -q "^CONFIG_KPM=y" out/.config
 
       - name: Build kernel
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           cd kernel
-          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out -j$(nproc) LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k"
+          set +e
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out -j$(nproc) LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k" 2>&1 | tee /tmp/build.log
+          rc=${PIPESTATUS[0]}
+          if [ $rc -ne 0 ]; then
+            {
+              echo "::error::build failed rc=$rc"
+              echo "--- error lines ---"
+              grep -nE "error:" /tmp/build.log | head -20
+            }
+            cd "$GITHUB_WORKSPACE"
+            rm -rf logrepo && mkdir logrepo && cd logrepo
+            git init -q .
+            git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            gzip -c /tmp/build.log > build.log.gz
+            git checkout -q -b ci-logs
+            git add build.log.gz
+            git -c user.email=ci@local -c user.name=ci commit -q -m "build log run ${GITHUB_RUN_ID}"
+            git push -q -f origin ci-logs
+            exit 1
+          fi
 
       - name: Verify artifacts
         run: |
