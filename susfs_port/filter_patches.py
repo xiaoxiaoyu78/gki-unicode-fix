@@ -7,9 +7,6 @@ KERNEL_EXCLUDES = {
     'security/selinux/status.c', 'drivers/input/input.c',
 }
 
-# Nova's KSU tree diverges from upstream: only take the SUSFS config menu
-# and the sid helpers appended to selinux.c/h. Everything else is handled
-# by nova_susfs_adapt.patch / apply_ksu_susfs.sh.
 KSU_KEEP = {
     'kernel/Kconfig',
     'kernel/selinux/selinux.c',
