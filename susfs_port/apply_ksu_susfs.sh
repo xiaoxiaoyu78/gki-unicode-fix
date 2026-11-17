@@ -27,6 +27,7 @@ fi
 
 python3 - <<'PYEOF'
 import sys
+
 p='kernel/hook/setuid_hook.c'
 s=open(p).read()
 if '#include <linux/susfs_def.h>' not in s:
@@ -46,17 +47,13 @@ if '#include <linux/cred.h>' not in s:
 
 p='kernel/supercall/supercall.c'
 s=open(p).read()
-if 'ksu_susfs_reboot_cmd' in s and 'extern void ksu_susfs_reboot_cmd' not in s:
-    s=s.replace('#include "klog.h" // IWYU pragma: keep','extern void ksu_susfs_reboot_cmd(unsigned int cmd, void __user *arg);\n\n#include "klog.h" // IWYU pragma: keep',1)
+if 'extern void ksu_susfs_reboot_cmd' not in s:
+    a='#include <linux/susfs_def.h>\n'
+    if a not in s:
+        sys.exit('susfs_def include missing in supercall.c')
+    s=s.replace(a, a+'\n#ifdef CONFIG_KSU_SUSFS\nextern void ksu_susfs_reboot_cmd(unsigned int cmd, void __user *arg);\n#endif\n',1)
     open(p,'w').write(s)
-    print('supercall.c prototype added')
-
-p='kernel/core/init.c'
-s=open(p).read()
-if 'susfs_set_batch_sid' not in s:
-    s=s.replace('#ifdef CONFIG_KSU_SUSFS\n    susfs_init();','extern void susfs_set_batch_sid(void);\n\n#ifdef CONFIG_KSU_SUSFS\n    susfs_init();\n    susfs_set_batch_sid();',1)
-    open(p,'w').write(s)
-    print('init.c batch sid call added')
+    print('supercall.c extern decl added')
 
 p='kernel/feature/sucompat.c'
 s=open(p).read()
@@ -68,6 +65,5 @@ PYEOF
 
 grep -q "susfs_reboot.o" kernel/Kbuild || { echo "::error::kernel/Kbuild has no susfs_reboot.o"; exit 1; }
 grep -q "linux/susfs_def.h" kernel/hook/setuid_hook.c || { echo "::error::setuid_hook.c has no susfs_def include"; exit 1; }
-grep -q "susfs_set_batch_sid" kernel/core/init.c || { echo "::error::init.c has no batch sid call"; exit 1; }
-grep -q "extern void ksu_susfs_reboot_cmd" kernel/supercall/supercall.c || { echo "::error::supercall.c has no prototype"; exit 1; }
+grep -q "extern void ksu_susfs_reboot_cmd" kernel/supercall/supercall.c || { echo "::error::supercall.c has no reboot_cmd decl"; exit 1; }
 echo APPLY_OK
