@@ -1,1 +1,157 @@
-__PLACEHOLDER_C__
+--- a/kernel/core/init.c
++++ b/kernel/core/init.c
+@@ -6,6 +6,7 @@
+ #include <linux/sched.h>
+ #include <linux/workqueue.h>
+ #include <linux/moduleparam.h>
++#include <linux/susfs.h>
+ 
+ #include "policy/allowlist.h"
+ #include "policy/app_profile.h"
+@@ -149,6 +150,11 @@
+     pr_info("initializing symbol resolver\n");
+     ksu_init_symbol_resolver();
+ 
++#ifdef CONFIG_KSU_SUSFS
++    susfs_init();
++    pr_info("susfs initialized\n");
++#endif
++
+     ret = ksu_selinux_inode_init();
+     if (ret) {
+         put_cred(ksu_cred);
+--- a/kernel/hook/setuid_hook.c
++++ b/kernel/hook/setuid_hook.c
+@@ -45,6 +45,11 @@
+         ksu_set_task_tracepoint_flag(current);
+     } else {
+         ksu_clear_task_tracepoint_flag_if_needed(current);
++#ifdef CONFIG_KSU_SUSFS
++        // mark non-su app process as umounted so SUSFS can hide sus mounts/paths
++        susfs_set_current_proc_no_su();
++        susfs_set_current_proc_umounted();
++#endif
+     }
+ 
+     // Handle kernel umount
+--- a/kernel/Kbuild
++++ b/kernel/Kbuild
+@@ -59,6 +59,7 @@
+ kernelsu-objs += sulog/fd.o
+ 
+ kernelsu-objs += supercall/dispatch.o
++kernelsu-objs += supercall/susfs_reboot.o
+ kernelsu-objs += supercall/perm.o
+ kernelsu-objs += supercall/supercall.o
+ 
+--- a/kernel/supercall/supercall.c
++++ b/kernel/supercall/supercall.c
+@@ -17,6 +17,7 @@
+ #include "arch.h"
+ #include "util.h"
+ #include "klog.h" // IWYU pragma: keep
++#include <linux/susfs_def.h>
+ 
+ #define KSU_DRIVER_PERMISSION_SU_SESSION (1UL << 0)
+ 
+@@ -120,6 +121,14 @@
+     int magic1 = (int)PT_REGS_SYSCALL_PARM1(real_regs);
+     int magic2 = (int)PT_REGS_PARM2(real_regs);
+ 
++#ifdef CONFIG_KSU_SUSFS
++    if (magic1 == KSU_INSTALL_MAGIC1 && magic2 == SUSFS_MAGIC && current_uid().val == 0) {
++        ksu_susfs_reboot_cmd((unsigned int)PT_REGS_PARM3(real_regs),
++                             (void __user *)PT_REGS_SYSCALL_PARM4(real_regs));
++        return 0;
++    }
++#endif
++
+     if (magic1 == KSU_INSTALL_MAGIC1 && magic2 == KSU_INSTALL_MAGIC2) {
+         struct ksu_install_fd_tw *tw;
+         unsigned long arg4 = (unsigned long)PT_REGS_SYSCALL_PARM4(real_regs);
+--- /dev/null
++++ b/kernel/supercall/susfs_reboot.c
+@@ -0,0 +1,83 @@
++#include <linux/types.h>
++#include <linux/uidgid.h>
++#include <linux/susfs.h>
++#include <linux/susfs_def.h>
++#include "klog.h" // IWYU pragma: keep
++
++void ksu_susfs_reboot_cmd(unsigned int cmd, void __user *arg)
++{
++    void __user **p = (void __user **)arg;
++
++    switch (cmd) {
++#ifdef CONFIG_KSU_SUSFS_SUS_PATH
++    case CMD_SUSFS_ADD_SUS_PATH:
++        susfs_add_sus_path(p);
++        return;
++    case CMD_SUSFS_ADD_SUS_PATH_LOOP:
++        susfs_add_sus_path_loop(p);
++        return;
++    case CMD_SUSFS_SET_SUS_PATH_UID_FILTER:
++        susfs_set_sus_path_uid_filter(p);
++        return;
++#endif
++#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++    case CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS:
++        susfs_set_hide_sus_mnts_for_non_su_procs(p);
++        return;
++#endif
++#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
++    case CMD_SUSFS_ADD_SUS_KSTAT:
++    case CMD_SUSFS_ADD_SUS_KSTAT_STATICALLY:
++        susfs_add_sus_kstat(p);
++        return;
++    case CMD_SUSFS_UPDATE_SUS_KSTAT:
++        susfs_update_sus_kstat(p);
++        return;
++#endif
++#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
++    case CMD_SUSFS_SET_UNAME:
++        susfs_set_uname(p);
++        return;
++#endif
++#ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
++    case CMD_SUSFS_ENABLE_LOG:
++        susfs_enable_log(p);
++        return;
++#endif
++#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
++    case CMD_SUSFS_SET_CMDLINE_OR_BOOTCONFIG:
++        susfs_set_cmdline_or_bootconfig(p);
++        return;
++#endif
++#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
++    case CMD_SUSFS_ADD_OPEN_REDIRECT:
++        susfs_add_open_redirect(p);
++        return;
++#endif
++#ifdef CONFIG_KSU_SUSFS_SUS_MAP
++    case CMD_SUSFS_ADD_SUS_MAP:
++        susfs_add_sus_map(p);
++        return;
++#endif
++#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
++    case CMD_SUSFS_SET_PRIORITY_UID_FILTER:
++        susfs_set_priority_uid_filter(p);
++        return;
++#endif
++    case CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING:
++        susfs_set_avc_log_spoofing(p);
++        return;
++    case CMD_SUSFS_SHOW_ENABLED_FEATURES:
++        susfs_get_enabled_features(p);
++        return;
++    case CMD_SUSFS_SHOW_VARIANT:
++        susfs_show_variant(p);
++        return;
++    case CMD_SUSFS_SHOW_VERSION:
++        susfs_show_version(p);
++        return;
++    default:
++        pr_err("susfs: unsupported cmd 0x%x\n", cmd);
++        return;
++    }
++}
