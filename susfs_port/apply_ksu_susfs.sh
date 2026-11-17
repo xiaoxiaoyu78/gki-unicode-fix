@@ -55,15 +55,16 @@ if 'extern void ksu_susfs_reboot_cmd' not in s:
     open(p,'w').write(s)
     print('supercall.c extern decl added')
 
-p='kernel/feature/sucompat.c'
+p='kernel/selinux/selinux.c'
 s=open(p).read()
-if 'ret = escape_to_root_for_init();' in s:
-    s=s.replace('ret = escape_to_root_for_init();','escape_to_root_for_init();\n        ret = 0;',1)
+if 'susfs_is_current_ksu_domain' not in s:
+    s=s.rstrip()+'\n\n#ifdef CONFIG_KSU_SUSFS\nbool susfs_is_current_ksu_domain(void)\n{\n    return is_ksu_domain();\n}\n#endif\n'
     open(p,'w').write(s)
-    print('sucompat.c void-return fix applied')
+    print('selinux.c susfs_is_current_ksu_domain added')
 PYEOF
 
 grep -q "susfs_reboot.o" kernel/Kbuild || { echo "::error::kernel/Kbuild has no susfs_reboot.o"; exit 1; }
 grep -q "linux/susfs_def.h" kernel/hook/setuid_hook.c || { echo "::error::setuid_hook.c has no susfs_def include"; exit 1; }
 grep -q "extern void ksu_susfs_reboot_cmd" kernel/supercall/supercall.c || { echo "::error::supercall.c has no reboot_cmd decl"; exit 1; }
+grep -q "susfs_is_current_ksu_domain" kernel/selinux/selinux.c || { echo "::error::selinux.c has no susfs domain fn"; exit 1; }
 echo APPLY_OK

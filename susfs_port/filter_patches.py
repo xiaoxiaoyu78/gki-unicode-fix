@@ -8,15 +8,12 @@ KERNEL_EXCLUDES = {
     'security/selinux/selinuxfs.c', 'security/selinux/hooks.c',
 }
 
-KSU_EXCLUDES = {
-    'kernel/Kbuild', 'kernel/Makefile', 'kernel/core/init.c',
-    'kernel/hook/setuid_hook.c', 'kernel/policy/allowlist.c',
-    'kernel/runtime/ksud_integration.c',
-    'kernel/supercall/supercall.c', 'kernel/supercall/dispatch.c',
-    'kernel/policy/app_profile.c', 'kernel/policy/app_profile.h',
-}
+# Only the SUSFS Kconfig menu is taken from the upstream KSU patch; all other
+# KSU-side integration is hand-written in nova_susfs_adapt.patch because the
+# upstream file versions do not match SukiSU Nova v3.0.0.
+KSU_INCLUDE = {'kernel/Kconfig'}
 
-def filter_patch(src_path, out_path, excludes):
+def filter_patch(src_path, out_path, excludes, include_only=None):
     src = open(src_path).read()
     kept = []
     for part in re.split(r'(?m)^diff --git ', src)[1:]:
@@ -24,7 +21,11 @@ def filter_patch(src_path, out_path, excludes):
         m = re.match(r'diff --git a/(.*?) b/(.*?)\n', head)
         if not m:
             continue
-        if m.group(2) in excludes:
+        name = m.group(2)
+        if include_only is not None:
+            if name not in include_only:
+                continue
+        elif name in excludes:
             continue
         kept.append(head)
     open(out_path, 'w').write(''.join(kept))
@@ -33,4 +34,4 @@ def filter_patch(src_path, out_path, excludes):
 filter_patch('susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch',
              '50_kernel_filtered.patch', KERNEL_EXCLUDES)
 filter_patch('susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch',
-             '10_ksu_filtered.patch', KSU_EXCLUDES)
+             '10_ksu_filtered.patch', set(), KSU_INCLUDE)
