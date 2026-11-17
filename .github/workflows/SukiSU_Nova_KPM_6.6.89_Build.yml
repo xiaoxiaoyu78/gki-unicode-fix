@@ -19,20 +19,23 @@ jobs:
           ref: 14220ae4ce65ba58711f65587ef4e93f408892fb
           path: kernel
 
-      - name: Fetch zero-width patch
+      - name: Fetch zero-width fix
         run: |
           curl -fsSL -o fix1.patch "https://raw.githubusercontent.com/xiaoxiaoyu78/gki-unicode-fix/main/fix1.patch"
           ls -l fix1.patch
-          grep -q 'ignore_init' fix1.patch || { echo "::error::unexpected fix1.patch"; exit 1; }
+          head -3 fix1.patch
 
-      - name: Apply zero-width patch
+      - name: Apply zero-width fix only (no SKRoot)
         run: |
           cd kernel
-          echo "=== fix1 dry-run ==="
           patch -p1 --dry-run < ../fix1.patch
           patch -p1 < ../fix1.patch
           if grep -q "ignore_init" fs/unicode/mkutf8data.c; then echo "::error::ignore_init still present"; exit 1; fi
-          echo PATCH_OK
+          test -f fs/skroot_umh.c && { echo "::error::skroot source present, should be removed"; exit 1; } || true
+          grep -q "skroot" fs/exec.c && { echo "::error::skroot hook still in exec.c"; exit 1; } || true
+          grep -q "skroot" fs/Makefile && { echo "::error::skroot in fs/Makefile"; exit 1; } || true
+          test -f include/linux/skroot.h && { echo "::error::skroot header present"; exit 1; } || true
+          echo ZERO_WIDTH_ONLY_OK
 
       - name: Integrate SukiSU Nova kernel driver
         run: |
@@ -44,9 +47,9 @@ jobs:
           git -C KernelSU describe --tags --always
           ls -l drivers/kernelsu
           test -e drivers/kernelsu/Kbuild || { echo "::error::kernelsu symlink broken"; exit 1; }
-          test -d drivers/kernelsu/extension/kpm || { echo "::error::kpm sources missing"; exit 1; }
           grep -n kernelsu drivers/Makefile
           grep -n kernelsu drivers/Kconfig
+          ls kernel/extension/kpm/ | head
 
       - name: Install build deps
         run: |
@@ -68,10 +71,11 @@ jobs:
           scripts/config --file out/.config --set-str LOCALVERSION ""
           make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out olddefconfig
           echo "--- config ---"
-          grep -E '^CONFIG_KSU=|^CONFIG_KPM=|^CONFIG_KSU_DEBUG=|^CONFIG_KPROBES=|^CONFIG_EXT4_FS=|^CONFIG_KALLSYMS' out/.config
+          grep -E '^CONFIG_KSU=|^CONFIG_KSU_DEBUG=|^CONFIG_KPM=|^CONFIG_KPROBES=|^CONFIG_EXT4_FS=|^CONFIG_KALLSYMS' out/.config
           grep -q '^CONFIG_KSU=y' out/.config || { echo "::error::CONFIG_KSU not enabled"; exit 1; }
           grep -q '^CONFIG_KPM=y' out/.config || { echo "::error::CONFIG_KPM not enabled"; exit 1; }
-          grep -q '^CONFIG_KALLSYMS_ALL=y' out/.config || { echo "::error::KALLSYMS_ALL not enabled"; exit 1; }
+          grep -q '^CONFIG_KALLSYMS_ALL=y' out/.config || { echo "::error::CONFIG_KALLSYMS_ALL not enabled"; exit 1; }
+          grep -q '^CONFIG_KPROBES=y' out/.config || { echo "::error::CONFIG_KPROBES not enabled"; exit 1; }
 
       - name: Assert kernel release string
         run: |
@@ -84,22 +88,21 @@ jobs:
       - name: Build kernel
         run: |
           cd kernel
-          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out -j$(nproc) LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k" 2>&1 | tee build.log
-          grep -q 'KPM is enabled' build.log || { echo "::error::KPM was not enabled in build"; exit 1; }
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out -j$(nproc) LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k"
 
       - name: Verify artifacts
         run: |
           ls -la kernel/out/arch/arm64/boot/
           cat kernel/out/include/config/kernel.release
           strings kernel/out/arch/arm64/boot/Image | grep -m1 "Linux version"
-          echo "--- ksu symbols ---"
+          echo "--- ksu/kpm symbols ---"
           grep -c -E ' ksu_' kernel/out/System.map || true
-          echo "--- kpm symbols ---"
-          grep -E ' (do_kpm|kpm_)' kernel/out/System.map | head -20
+          grep -E ' (do_kpm|kpm_)' kernel/out/System.map | head -5 || true
           test -n "$(grep -E ' ksu_' kernel/out/System.map | head -1)" || { echo "::error::no ksu symbols"; exit 1; }
-          test -n "$(grep -E ' do_kpm$' kernel/out/System.map | head -1)" || { echo "::error::do_kpm missing (KPM not linked in)"; exit 1; }
-          strings kernel/out/arch/arm64/boot/Image | grep -m6 -iE 'kpm|KernelPatch|KernelSU' || true
-          echo VERIFY_OK
+          test -n "$(grep -E ' do_kpm$| do_kpm ' kernel/out/System.map | head -1)" || { echo "::error::no do_kpm symbol, KPM likely off"; exit 1; }
+          echo "--- no skroot ---"
+          ! strings kernel/out/arch/arm64/boot/Image | grep -q "skroot" || { echo "::error::skroot string still in image"; exit 1; }
+          echo NO_SKROOT_OK
 
       - name: Download VioletAVB base boot
         run: |
@@ -125,20 +128,20 @@ jobs:
           cd AOSP-Testkey-BootSigner-main
           python3 rebuild_avb.py --chained-mode
           ls -la boot.img
-          python3 tools/avbtool.py info_image --image boot.img | grep -E "Algorithm|Partition Name|fingerprint" | head -4
+          python3 tools/avbtool.py info_image --image boot.img | grep -E "Algorithm|Partition Name" | head -4
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: sukisu-nova-kpm-6.6.89-boot-${{ github.run_id }}
-          name: sukisu-nova-kpm-6.6.89-boot-${{ github.run_id }}
+          tag_name: suksisu-nova-kpm-6.6.89-boot-${{ github.run_id }}
+          name: suksisu-nova-kpm-6.6.89-boot-${{ github.run_id }}
           body: |
             6.6.89 GKI (aosp-mirror/kernel_common @14220ae4) kernel:
             - CVE-2024-43093 zero-width fix (fix1.patch)
             - SukiSU Nova kernel driver (SukiSU-Nova/SukiSU-Nova v3.0.0)
-            - CONFIG_KSU=y, CONFIG_KPROBES=y, CONFIG_KALLSYMS_ALL=y, CONFIG_KPM=y
-            - SKRoot trigger/token gate intentionally NOT included in this build
-            Manager: com.sukisu.nova (SukiSU Nova v3.0.0)
+            - CONFIG_KSU=y, CONFIG_KPROBES=y, CONFIG_EXT4_FS=y, CONFIG_KALLSYMS_ALL=y, CONFIG_KPM=y
+            - SKRoot trigger / token gate removed (no fs/skroot_umh.c, no execve hook in this build)
+            Manager: com.sukisu.nova (SukiSU Nova v3.0.0, versionCode 30000)
             Kernel: 6.6.89-android15-8-g14220ae4ce65-ab13680582-4k
             Base: VioletAVB_boot.img, magiskboot kernel swap, AOSP testkey chained AVB
           files: |
