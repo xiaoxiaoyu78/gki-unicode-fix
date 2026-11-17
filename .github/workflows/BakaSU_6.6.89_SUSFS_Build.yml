@@ -1,0 +1,150 @@
+name: BakaSU_6.6.89_SUSFS_Build
+
+on:
+  push:
+    branches: [bakasu-689]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build_6.6.89_zerowidth_resukisu_susfs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: aosp-mirror/kernel_common
+          ref: 14220ae4ce65ba58711f65587ef4e93f408892fb
+          path: kernel
+
+      - name: Fetch helper scripts and zero-width fix
+        run: |
+          git clone --depth 1 -b bakasu-689 https://github.com/xiaoxiaoyu78/gki-unicode-fix patches
+          ls -l patches/susfs_port
+          curl -fsSL -o fix1.patch "https://raw.githubusercontent.com/xiaoxiaoyu78/gki-unicode-fix/main/fix1.patch"
+          cd kernel && patch -p1 < ../fix1.patch
+          ! grep -q "ignore_init" fs/unicode/mkutf8data.c && echo ZERO_WIDTH_OK
+
+      - name: Integrate ReSukiSU kernel driver
+        run: |
+          cd kernel
+          git clone https://github.com/ReSukiSU/ReSukiSU KernelSU
+          sh KernelSU/kernel/setup.sh v4.2.0-rc3
+          git -C KernelSU log -1 --oneline
+          test -e drivers/kernelsu/Kbuild
+
+      - name: Fetch susfs4ksu sources
+        run: |
+          git clone --depth 1 -b gki-android15-6.6 https://gitlab.com/simonpunk/susfs4ksu susfs4ksu
+          git -C susfs4ksu log -1 --format="%H %s"
+          python3 patches/susfs_port/filter_patches.py
+
+      - name: Apply susfs kernel-side files and patch
+        run: |
+          cp susfs4ksu/kernel_patches/fs/susfs.c kernel/fs/susfs.c
+          cp susfs4ksu/kernel_patches/include/linux/susfs.h kernel/include/linux/susfs.h
+          cp susfs4ksu/kernel_patches/include/linux/susfs_def.h kernel/include/linux/susfs_def.h
+          cd kernel
+          patch -p1 --forward -F3 < ../50_kernel_filtered.patch
+          ! find . -name "*.rej" | grep -q . && echo KERNEL_PATCH_OK
+          python3 -c "p='fs/proc/base.c';s=open(p).read();a='#include <linux/cpufreq_times.h>\n';assert a in s;s=s.replace(a,a+'#if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs_def.h>\n#endif\n',1);open(p,'w').write(s);print('base.c include ok')"
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q flex bison bc cpio lz4 zstd xz-utils python3 file gawk dwarves libssl-dev libelf-dev libncurses-dev clang lld llvm
+
+      - name: Configure defconfig (KSU + SUSFS)
+        run: |
+          cd kernel
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out gki_defconfig
+          scripts/config --file out/.config --enable KSU
+          scripts/config --file out/.config --enable KPROBES
+          scripts/config --file out/.config --enable EXT4_FS
+          scripts/config --file out/.config --enable KALLSYMS
+          scripts/config --file out/.config --enable KSU_TRACEPOINT_HOOK
+          scripts/config --file out/.config --enable KSU_SUSFS
+          scripts/config --file out/.config --disable KSU_MANUAL_HOOK
+          scripts/config --file out/.config --disable KSU_DEBUG
+          scripts/config --file out/.config --disable LOCALVERSION_AUTO
+          scripts/config --file out/.config --set-str LOCALVERSION ""
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out olddefconfig
+          grep -E "^CONFIG_(KSU|KSU_SUSFS|KSU_SUSFS_SUS_PATH|KSU_SUSFS_SUS_MOUNT|KSU_SUSFS_SUS_KSTAT|KSU_SUSFS_SPOOF_UNAME|KSU_SUSFS_ENABLE_LOG|KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS|KPROBES|EXT4_FS)" out/.config | sort
+          grep -q "^CONFIG_KSU=y" out/.config
+          grep -q "^CONFIG_KSU_SUSFS=y" out/.config
+          grep -q "^CONFIG_KSU_TRACEPOINT_HOOK=y" out/.config
+
+      - name: Build kernel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd kernel
+          set +e
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out -j$(nproc) LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k" 2>&1 | tee /tmp/build.log
+          rc=${PIPESTATUS[0]}
+          if [ $rc -ne 0 ]; then
+            echo "::error::build failed rc=$rc"
+            grep -nE "error:" /tmp/build.log | head -10
+            cd "$GITHUB_WORKSPACE"
+            rm -rf logrepo && mkdir logrepo && cd logrepo
+            git init -q .
+            git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            gzip -c /tmp/build.log > build.log.gz
+            git checkout -q -b ci-logs
+            git add build.log.gz
+            git -c user.email=ci@local -c user.name=ci commit -q -m "build log run ${GITHUB_RUN_ID}"
+            git push -q -f origin ci-logs
+            exit 1
+          fi
+
+      - name: Verify artifacts
+        run: |
+          cd kernel
+          cat out/include/config/kernel.release
+          strings out/arch/arm64/boot/Image | grep -m1 "Linux version"
+          test -n "$(grep -E " susfs_init| susfs_show_version" out/System.map | head -1)"
+          test -n "$(grep -E " ksu_" out/System.map | head -1)"
+          if strings out/arch/arm64/boot/Image | grep -q "skroot"; then echo "::error::skroot string found"; exit 1; fi
+          strings out/arch/arm64/boot/Image | grep -m2 -E "susfs|SUSFS"
+          echo SUSFS_OK
+
+      - name: Download VioletAVB base boot
+        run: |
+          curl -fsSL -o VioletAVB_boot.img "https://aka.doubaocdn.com/s/JLSTVbGrXV"
+          test $(stat -c%s VioletAVB_boot.img) -eq 100663296
+
+      - name: Repack with magiskboot
+        run: |
+          curl -fsSL -o avb.tar.gz "https://github.com/showdo/AOSP-Testkey-BootSigner/archive/refs/heads/main.tar.gz"
+          tar -xzf avb.tar.gz
+          chmod +x AOSP-Testkey-BootSigner-main/tools/magiskboot
+          mkdir -p work && cp VioletAVB_boot.img work/boot.img
+          cd work
+          ../AOSP-Testkey-BootSigner-main/tools/magiskboot unpack boot.img
+          rm -f kernel && cp ../kernel/out/arch/arm64/boot/Image kernel
+          ../AOSP-Testkey-BootSigner-main/tools/magiskboot repack boot.img
+          cp new-boot.img ../AOSP-Testkey-BootSigner-main/boot.img
+
+      - name: AVB sign
+        run: |
+          cd AOSP-Testkey-BootSigner-main
+          python3 rebuild_avb.py --chained-mode
+          python3 tools/avbtool.py info_image --image boot.img | grep -E "Algorithm|Public key|Rollback Index" | head -4
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: bakasu-susfs-6.6.89-boot-${{ github.run_id }}
+          name: bakasu-susfs-6.6.89-boot-${{ github.run_id }}
+          body: |
+            6.6.89 GKI (aosp-mirror/kernel_common @14220ae4):
+            - CVE-2024-43093 zero-width fix
+            - ReSukiSU (BakaSU) v4.2.0-rc3 kernel driver (CONFIG_KSU=y, tracepoint hook)
+            - susfs4ksu gki-android15-6.6 kernel patches (CONFIG_KSU_SUSFS=y)
+            Manager: ReSukiSU
+          files: |
+            AOSP-Testkey-BootSigner-main/boot.img
+            kernel/out/arch/arm64/boot/Image
+          fail_on_unmatched: false
