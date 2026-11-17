@@ -1,0 +1,16 @@
+--- a/kernel/supercall/susfs_reboot.c
++++ b/kernel/supercall/susfs_reboot.c
+@@ -8,7 +8,12 @@
+ 
+ void ksu_susfs_reboot_cmd(unsigned int cmd, void __user *arg)
+ {
+-    void __user **p = (void __user **)arg;
++    /* reboot() carries the payload pointer straight out of userspace; the
++     * susfs helpers expect the address of a kernel pointer that holds it.
++     * Dereferencing the raw user address here faults under PAN.
++     */
++    void __user *susfs_uinfo = arg;
++    void __user **p = &susfs_uinfo;
+ 
+     switch (cmd) {
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
