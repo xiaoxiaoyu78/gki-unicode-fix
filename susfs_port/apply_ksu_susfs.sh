@@ -43,6 +43,13 @@ if '#include <linux/cred.h>' not in s:
     s=s.replace('#include <linux/types.h>\n','#include <linux/types.h>\n#include <linux/cred.h>\n#include <linux/printk.h>\n',1)
     open(p,'w').write(s)
     print('susfs_reboot.c includes patched')
+
+p='kernel/feature/sucompat.c'
+s=open(p).read()
+if 'ret = escape_to_root_for_init();' in s:
+    s=s.replace('ret = escape_to_root_for_init();','escape_to_root_for_init();\n        ret = 0;',1)
+    open(p,'w').write(s)
+    print('sucompat.c void-return fix applied')
 PYEOF
 
 grep -q "susfs_reboot.o" kernel/Kbuild || { echo "::error::kernel/Kbuild has no susfs_reboot.o"; exit 1; }
